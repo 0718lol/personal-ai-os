@@ -1,0 +1,9 @@
+data/
+output/
+output-*.png
+__pycache__/
+.deps/
+node_modules/
+.asteam-product.log
+.env
+.env.*

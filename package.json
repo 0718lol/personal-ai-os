@@ -1,0 +1,14 @@
+{
+  "name": "personal-ai-os",
+  "version": "0.1.0",
+  "description": "Local-first personal AI workspace for notes, PDFs, search, memory, tasks, and lightweight agents.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "./start.sh"
+  },
+  "dependencies": {
+    "mupdf": "^1.28.0",
+    "pdf-parse": "^1.1.1"
+  }
+}

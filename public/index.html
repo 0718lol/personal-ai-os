@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <title>个人 AI 工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260803-1748" />
+  </head>
+  <body>
+    <div id="app" class="shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <div class="brand-mark">AI</div>
+          <div>
+            <div class="brand-name">个人 AI 工作台 <span class="brand-version">17:48</span></div>
+            <div class="brand-subtitle">本地优先的知识与任务中枢 · 17:48</div>
+          </div>
+          <button class="brand-settings" data-nav="settings" type="button">设置</button>
+        </div>
+        <nav class="nav" id="nav"></nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="section-kicker" id="view-kicker">工作区</div>
+            <h1 id="view-title">首页</h1>
+          </div>
+          <form class="global-search" id="global-search">
+            <input id="global-search-input" type="search" placeholder="搜索资料、笔记、任务" autocomplete="off" />
+            <button type="submit" title="搜索">搜索</button>
+          </form>
+        </header>
+
+        <section id="view" class="view" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <template id="empty-template">
+      <div class="empty">
+        <div class="empty-title"></div>
+        <p></p>
+      </div>
+    </template>
+
+    <script src="/assets/app.js?v=20260803-1748" type="module"></script>
+  </body>
+</html>
