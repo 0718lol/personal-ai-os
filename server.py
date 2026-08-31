@@ -52,8 +52,7 @@ def connect() -> sqlite3.Connection:
 def ensure_db() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
-    if not DB_PATH.exists():
-        init_db()
+    init_db()
 
 
 def init_db() -> None:
@@ -161,6 +160,7 @@ def init_db() -> None:
               kind TEXT NOT NULL,
               title TEXT NOT NULL,
               detail TEXT NOT NULL,
+              project_id TEXT NOT NULL DEFAULT '',
               created_at TEXT NOT NULL
             );
 
@@ -241,6 +241,30 @@ def init_db() -> None:
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS insights (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL DEFAULT '',
+              note_id TEXT NOT NULL DEFAULT '',
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              source_quote TEXT NOT NULL DEFAULT '',
+              confidence REAL NOT NULL DEFAULT 0.65,
+              status TEXT NOT NULL DEFAULT 'open',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS deliverables (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL DEFAULT '',
+              template TEXT NOT NULL,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         note_columns = {row["name"] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
@@ -252,6 +276,10 @@ def init_db() -> None:
         ensure_column(conn, "sources", "quality_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "chunks", "page_start", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "chunks", "page_end", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "events", "project_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "insights", "project_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "insights", "note_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "deliverables", "project_id", "TEXT NOT NULL DEFAULT ''")
         seed_defaults(conn)
         localize_default_records(conn)
         backfill_pdf_evidence_chunks(conn)
@@ -471,11 +499,124 @@ def row_dict(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
 
 
-def add_event(conn: sqlite3.Connection, kind: str, title: str, detail: str = "") -> None:
+def add_event(conn: sqlite3.Connection, kind: str, title: str, detail: str = "", project_id: str = "") -> None:
     conn.execute(
-        "INSERT INTO events(id, kind, title, detail, created_at) VALUES (?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), kind, title, detail, now_iso()),
+        "INSERT INTO events(id, kind, title, detail, project_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), kind, title, detail, project_id, now_iso()),
     )
+
+
+def link_project_item(conn: sqlite3.Connection, project_id: str, item_type: str, item_id: str) -> None:
+    if not project_id:
+        return
+    project = conn.execute("SELECT id FROM collections WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        return
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO collection_items(collection_id, item_type, item_id, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (project_id, item_type, item_id, now_iso()),
+    )
+
+
+def project_counts(conn: sqlite3.Connection, project_id: str) -> dict[str, int]:
+    def count(item_type: str, join_sql: str = "", where_sql: str = "") -> int:
+        row = conn.execute(
+            f"""
+            SELECT count(*) AS total
+            FROM collection_items ci
+            {join_sql}
+            WHERE ci.collection_id = ? AND ci.item_type = ? {where_sql}
+            """,
+            (project_id, item_type),
+        ).fetchone()
+        return int(row["total"] or 0)
+
+    return {
+        "sources": count("source"),
+        "notes": count("note"),
+        "tasks": count("task", "JOIN tasks ON tasks.id = ci.item_id", "AND tasks.status != 'done'"),
+        "done_tasks": count("task", "JOIN tasks ON tasks.id = ci.item_id", "AND tasks.status = 'done'"),
+        "memories": count("memory", "JOIN memories ON memories.id = ci.item_id", "AND memories.status = 'approved'"),
+        "memory_candidates": count("memory", "JOIN memories ON memories.id = ci.item_id", "AND memories.status = 'candidate'"),
+    }
+
+
+def project_resume(conn: sqlite3.Connection, project_id: str) -> dict[str, Any]:
+    project = conn.execute("SELECT * FROM collections WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        return {}
+    counts = project_counts(conn, project_id)
+    latest_event = conn.execute(
+        "SELECT * FROM events WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    latest_note = conn.execute(
+        """
+        SELECT notes.*
+        FROM collection_items ci
+        JOIN notes ON notes.id = ci.item_id
+        WHERE ci.collection_id = ? AND ci.item_type = 'note'
+        ORDER BY notes.updated_at DESC
+        LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
+    next_tasks = conn.execute(
+        """
+        SELECT tasks.*
+        FROM collection_items ci
+        JOIN tasks ON tasks.id = ci.item_id
+        WHERE ci.collection_id = ? AND ci.item_type = 'task' AND tasks.status != 'done'
+        ORDER BY tasks.created_at DESC
+        LIMIT 3
+        """,
+        (project_id,),
+    ).fetchall()
+    open_question = extract_first_marker(latest_note["body"] if latest_note else "", ("问题", "QUESTION", "待确认"))
+    decision = extract_first_marker(latest_note["body"] if latest_note else "", ("决策", "DECISION", "决定"))
+    progress = latest_event["title"] if latest_event else "还没有项目活动。"
+    if latest_note:
+        progress = f"最近笔记：{safe_title(latest_note['title'] if latest_note['title'] != '无标题' else latest_note['body'][:80])}"
+    next_step = next_tasks[0]["title"] if next_tasks else "补一条 TODO，明确最小下一步。"
+    blocker = open_question or ("有待审核记忆需要确认。" if counts["memory_candidates"] else "暂无明确卡点。")
+    health = "推进中"
+    if not counts["tasks"]:
+        health = "缺少下一步"
+    elif counts["sources"] and not counts["notes"]:
+        health = "资料待整理"
+    elif counts["memory_candidates"]:
+        health = "上下文待确认"
+    return {
+        "health": health,
+        "progress": progress,
+        "next_step": next_step,
+        "blocker": blocker,
+        "decision": decision or "暂无明确决策记录。",
+        "last_activity_at": (latest_event["created_at"] if latest_event else project["updated_at"]),
+        "next_tasks": [row_dict(row) for row in next_tasks],
+    }
+
+
+def extract_first_marker(body: str, labels: tuple[str, ...]) -> str:
+    for line in str(body or "").splitlines():
+        for label in labels:
+            match = re.match(rf"^(?:[-*]\s*)?{re.escape(label)}[:：](.+)$", line.strip(), re.I)
+            if match:
+                return match.group(1).strip()[:260]
+    return ""
+
+
+def public_project(conn: sqlite3.Connection, row: sqlite3.Row, include_resume: bool = True) -> dict[str, Any]:
+    data = row_dict(row)
+    data["display_name"] = data["name"]
+    data["goal"] = data.get("description", "")
+    data["counts"] = project_counts(conn, data["id"])
+    if include_resume:
+        data["resume"] = project_resume(conn, data["id"])
+    return data
 
 
 def normalize_text(text: str) -> str:
@@ -838,23 +979,284 @@ def extract_tasks(body: str) -> list[str]:
     return tasks
 
 
+INSIGHT_LABELS = {
+    "decision": ("决策", "决定", "DECISION"),
+    "question": ("问题", "待确认", "QUESTION"),
+    "risk": ("风险", "卡点", "阻塞", "RISK", "BLOCKER"),
+    "follow_up": ("跟进", "FOLLOWUP", "FOLLOW-UP"),
+    "action": ("行动", "ACTION"),
+}
+
+
+def extract_insights(body: str) -> list[dict[str, Any]]:
+    insights: list[dict[str, Any]] = []
+    for line in str(body or "").splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        task_match = re.match(r"^(?:[-*]\s*\[\s?\]|TODO[:：]?|待办[:：]?|任务[:：]?)(.+)$", clean, re.I)
+        if task_match:
+            title = task_match.group(1).strip(" -:：")
+            if title:
+                insights.append({"kind": "action", "title": title[:160], "body": title, "source_quote": clean, "confidence": 0.82})
+            continue
+        for kind, labels in INSIGHT_LABELS.items():
+            for label in labels:
+                match = re.match(rf"^(?:[-*]\s*)?{re.escape(label)}[:：](.+)$", clean, re.I)
+                if not match:
+                    continue
+                text = match.group(1).strip(" -:：")
+                if text:
+                    insights.append({"kind": kind, "title": safe_title(text[:120]), "body": text, "source_quote": clean, "confidence": 0.76})
+                break
+            else:
+                continue
+            break
+    return dedupe_insights(insights)
+
+
+def dedupe_insights(insights: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = set()
+    result = []
+    for insight in insights:
+        key = (insight["kind"], insight["body"].strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(insight)
+    return result
+
+
+def save_insights(conn: sqlite3.Connection, project_id: str, note_id: str, insights: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    created = now_iso()
+    saved = []
+    for insight in insights:
+        insight_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO insights(id, project_id, note_id, kind, title, body, source_quote, confidence, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+            """,
+            (
+                insight_id,
+                project_id,
+                note_id,
+                insight["kind"],
+                insight["title"],
+                insight["body"],
+                insight.get("source_quote", ""),
+                float(insight.get("confidence") or 0.65),
+                created,
+                created,
+            ),
+        )
+        saved.append({"id": insight_id, **insight, "project_id": project_id, "note_id": note_id, "created_at": created, "updated_at": created})
+    return saved
+
+
+def insight_label(kind: str) -> str:
+    return {
+        "decision": "决策",
+        "question": "问题",
+        "risk": "风险",
+        "follow_up": "跟进",
+        "action": "行动",
+    }.get(kind, kind)
+
+
+def deliverable_title(project_name: str, template: str) -> str:
+    label = {
+        "weekly": "项目周报",
+        "plan": "下一步计划",
+        "review": "项目复盘",
+        "client": "客户汇报",
+        "risk": "风险清单",
+    }.get(template, "项目交付物")
+    return f"{project_name} - {label}"
+
+
+def build_deliverable(conn: sqlite3.Connection, project: sqlite3.Row, template: str) -> str:
+    project_id = project["id"]
+    resume = project_resume(conn, project_id)
+    tasks = conn.execute(
+        """
+        SELECT tasks.*
+        FROM collection_items ci
+        JOIN tasks ON tasks.id = ci.item_id
+        WHERE ci.collection_id = ? AND ci.item_type = 'task'
+        ORDER BY tasks.updated_at DESC
+        LIMIT 20
+        """,
+        (project_id,),
+    ).fetchall()
+    insights = conn.execute("SELECT * FROM insights WHERE project_id = ? ORDER BY created_at DESC LIMIT 30", (project_id,)).fetchall()
+    notes = conn.execute(
+        """
+        SELECT notes.*
+        FROM collection_items ci
+        JOIN notes ON notes.id = ci.item_id
+        WHERE ci.collection_id = ? AND ci.item_type = 'note'
+        ORDER BY notes.updated_at DESC
+        LIMIT 8
+        """,
+        (project_id,),
+    ).fetchall()
+    sources = conn.execute(
+        """
+        SELECT sources.*
+        FROM collection_items ci
+        JOIN sources ON sources.id = ci.item_id
+        WHERE ci.collection_id = ? AND ci.item_type = 'source'
+        ORDER BY sources.created_at DESC
+        LIMIT 8
+        """,
+        (project_id,),
+    ).fetchall()
+    grouped = group_insights(insights)
+    sections = [
+        f"# {deliverable_title(project['name'], template)}",
+        f"生成时间：{now_iso()}",
+        "",
+        "项目状态",
+        f"- 当前状态：{resume.get('health', '待推进')}",
+        f"- 上次进展：{resume.get('progress', '暂无')}",
+        f"- 当前卡点：{resume.get('blocker', '暂无明确卡点')}",
+        f"- 下一步：{resume.get('next_step', '暂无下一步')}",
+        f"- 最近决策：{resume.get('decision', '暂无明确决策')}",
+        "",
+    ]
+    if template == "weekly":
+        sections += markdown_list_section("本周完成/更新", [task["title"] for task in tasks if task["status"] == "done"] or [note_preview_text(note) for note in notes[:4]])
+        sections += markdown_list_section("下周重点", [task["title"] for task in tasks if task["status"] != "done"][:8])
+    elif template == "plan":
+        sections += markdown_list_section("下一步行动", [task["title"] for task in tasks if task["status"] != "done"][:10])
+        sections += markdown_list_section("需要确认的问题", [item["body"] for item in grouped.get("question", [])])
+    elif template == "review":
+        sections += markdown_list_section("关键决策", [item["body"] for item in grouped.get("decision", [])])
+        sections += markdown_list_section("经验和风险", [item["body"] for item in grouped.get("risk", [])])
+    elif template == "client":
+        sections += markdown_list_section("近期进展", [note_preview_text(note) for note in notes[:5]])
+        sections += markdown_list_section("需要客户确认", [item["body"] for item in grouped.get("question", [])])
+    elif template == "risk":
+        sections += markdown_list_section("风险清单", [item["body"] for item in grouped.get("risk", [])])
+        sections += markdown_list_section("跟进行动", [item["body"] for item in grouped.get("follow_up", [])] + [task["title"] for task in tasks if task["status"] != "done"][:5])
+    sections += markdown_list_section("决策记录", [item["body"] for item in grouped.get("decision", [])])
+    sections += markdown_list_section("最近资料", [source["title"] for source in sources])
+    sections += markdown_list_section("最近笔记", [note_preview_text(note) for note in notes[:6]])
+    return "\n".join(sections).strip() + "\n"
+
+
+def group_insights(insights: list[sqlite3.Row]) -> dict[str, list[sqlite3.Row]]:
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for insight in insights:
+        grouped.setdefault(insight["kind"], []).append(insight)
+    return grouped
+
+
+def markdown_list_section(title: str, items: list[str]) -> list[str]:
+    clean = [str(item or "").strip() for item in items if str(item or "").strip()]
+    if not clean:
+        return [title, "- 暂无", ""]
+    return [title, *[f"- {item}" for item in clean], ""]
+
+
+def note_preview_text(note: sqlite3.Row) -> str:
+    title = display_note_title(note)
+    body = re.sub(r"\s+", " ", str(note["body"] or "")).strip()
+    if body and title != body:
+        return f"{title}：{body[:180]}"
+    return title
+
+
 def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
     data = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
+    base_url = data.get("base_url", "https://api.openai.com/v1")
     return {
         "provider": data.get("provider", "openai-compatible"),
-        "base_url": data.get("base_url", "https://api.openai.com/v1"),
+        "base_url": base_url,
         "model": data.get("model", "gpt-4.1-mini"),
-        "api_key_configured": "yes" if data.get("api_key") else "no",
+        "api_key_configured": "yes" if data.get("api_key") else ("local" if is_local_model_url(base_url) else "no"),
+        "local_provider": "yes" if is_local_model_url(base_url) else "no",
     }
 
 
 def get_secret_settings(conn: sqlite3.Connection) -> dict[str, str]:
     data = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
+    base_url = data.get("base_url", "https://api.openai.com/v1").rstrip("/")
     return {
-        "base_url": data.get("base_url", "https://api.openai.com/v1").rstrip("/"),
+        "base_url": base_url,
         "model": data.get("model", "gpt-4.1-mini"),
-        "api_key": data.get("api_key", ""),
+        "api_key": data.get("api_key", "") or ("local" if is_local_model_url(base_url) else ""),
     }
+
+
+def is_local_model_url(base_url: str) -> bool:
+    host = urllib.parse.urlparse(str(base_url or "")).hostname or ""
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.startswith("192.168.") or host.startswith("10.") or host.startswith("172.")
+
+
+def discover_local_models() -> dict[str, Any]:
+    candidates = [
+        {"provider": "Ollama", "base_url": "http://127.0.0.1:11434/v1", "models_url": "http://127.0.0.1:11434/v1/models", "kind": "openai"},
+        {"provider": "Ollama", "base_url": "http://localhost:11434/v1", "models_url": "http://localhost:11434/v1/models", "kind": "openai"},
+        {"provider": "LM Studio", "base_url": "http://127.0.0.1:1234/v1", "models_url": "http://127.0.0.1:1234/v1/models", "kind": "openai"},
+        {"provider": "LM Studio", "base_url": "http://localhost:1234/v1", "models_url": "http://localhost:1234/v1/models", "kind": "openai"},
+        {"provider": "LocalAI", "base_url": "http://127.0.0.1:8080/v1", "models_url": "http://127.0.0.1:8080/v1/models", "kind": "openai"},
+        {"provider": "LocalAI", "base_url": "http://localhost:8080/v1", "models_url": "http://localhost:8080/v1/models", "kind": "openai"},
+        {"provider": "Jan", "base_url": "http://127.0.0.1:1337/v1", "models_url": "http://127.0.0.1:1337/v1/models", "kind": "openai"},
+        {"provider": "Jan", "base_url": "http://localhost:1337/v1", "models_url": "http://localhost:1337/v1/models", "kind": "openai"},
+        {"provider": "Ollama", "base_url": "http://127.0.0.1:11434/v1", "models_url": "http://127.0.0.1:11434/api/tags", "kind": "ollama"},
+    ]
+    found = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        result = probe_model_candidate(candidate)
+        if not result:
+            continue
+        key = (result["base_url"], result["model"])
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(result)
+    return {
+        "found": found,
+        "checked": [{"provider": item["provider"], "base_url": item["base_url"]} for item in candidates],
+        "recommended": found[0] if found else None,
+    }
+
+
+def probe_model_candidate(candidate: dict[str, str]) -> dict[str, Any] | None:
+    req = urllib.request.Request(candidate["models_url"], headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=0.8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    models = extract_model_names(data, candidate["kind"])
+    if not models:
+        return None
+    return {
+        "provider": candidate["provider"],
+        "base_url": candidate["base_url"],
+        "model": models[0],
+        "models": models[:12],
+        "api_key": "local",
+        "requires_api_key": False,
+    }
+
+
+def extract_model_names(data: Any, kind: str) -> list[str]:
+    if kind == "ollama":
+        raw_models = data.get("models", []) if isinstance(data, dict) else []
+        return [str(item.get("name") or item.get("model") or "").strip() for item in raw_models if isinstance(item, dict) and (item.get("name") or item.get("model"))]
+    raw_models = data.get("data", []) if isinstance(data, dict) else []
+    names = []
+    for item in raw_models:
+        if isinstance(item, dict) and item.get("id"):
+            names.append(str(item["id"]).strip())
+        elif isinstance(item, str):
+            names.append(item.strip())
+    return [name for name in names if name]
 
 
 def public_agent(row: sqlite3.Row) -> dict[str, Any]:
@@ -891,6 +1293,14 @@ def display_agent_name(agent_id: str) -> str:
         "librarian": "资料管理员",
         "reviewer": "审核助手",
     }.get(agent_id, agent_id)
+
+
+def display_note_title(note: sqlite3.Row) -> str:
+    title = str(note["title"] or "").strip()
+    if title and title != "无标题":
+        return title
+    body = str(note["body"] or "").strip()
+    return safe_title(body[:80]) if body else "无标题"
 
 
 def cite_location(item: dict[str, Any] | sqlite3.Row) -> str:
@@ -1061,16 +1471,35 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"status": "ok", "time": now_iso()})
             if path == "/api/dashboard":
                 return self.dashboard()
+            if path == "/api/projects":
+                return self.list_projects()
+            if path.startswith("/api/projects/"):
+                return self.get_project(path.rsplit("/", 1)[-1])
             if path == "/api/collections":
-                return self.list_collections()
+                return self.list_projects()
             if path == "/api/playbooks":
                 return self.list_playbooks()
             if path == "/api/settings":
                 with connect() as conn:
                     return json_response(self, get_settings(conn))
+            if path == "/api/models/discover":
+                return json_response(self, discover_local_models())
             if path == "/api/sources":
+                project_id = query.get("project_id", [""])[0]
                 with connect() as conn:
-                    rows = conn.execute("SELECT * FROM sources ORDER BY created_at DESC").fetchall()
+                    if project_id:
+                        rows = conn.execute(
+                            """
+                            SELECT sources.*
+                            FROM collection_items ci
+                            JOIN sources ON sources.id = ci.item_id
+                            WHERE ci.collection_id = ? AND ci.item_type = 'source'
+                            ORDER BY sources.created_at DESC
+                            """,
+                            (project_id,),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute("SELECT * FROM sources ORDER BY created_at DESC").fetchall()
                     return json_response(self, [source_summary(row) for row in rows])
             if path.startswith("/api/sources/"):
                 return self.get_source(path.rsplit("/", 1)[-1])
@@ -1080,13 +1509,43 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as conn:
                     return json_response(self, {"query": q, "results": search_chunks(conn, q, min(max(limit, 1), 30))})
             if path == "/api/notes":
+                project_id = query.get("project_id", [""])[0]
                 with connect() as conn:
-                    rows = conn.execute("SELECT * FROM notes ORDER BY updated_at DESC").fetchall()
+                    if project_id:
+                        rows = conn.execute(
+                            """
+                            SELECT notes.*
+                            FROM collection_items ci
+                            JOIN notes ON notes.id = ci.item_id
+                            WHERE ci.collection_id = ? AND ci.item_type = 'note'
+                            ORDER BY notes.updated_at DESC
+                            """,
+                            (project_id,),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute("SELECT * FROM notes ORDER BY updated_at DESC").fetchall()
                     return json_response(self, [row_dict(row) for row in rows])
             if path == "/api/tasks":
+                project_id = query.get("project_id", [""])[0]
                 with connect() as conn:
-                    rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+                    if project_id:
+                        rows = conn.execute(
+                            """
+                            SELECT tasks.*
+                            FROM collection_items ci
+                            JOIN tasks ON tasks.id = ci.item_id
+                            WHERE ci.collection_id = ? AND ci.item_type = 'task'
+                            ORDER BY tasks.created_at DESC
+                            """,
+                            (project_id,),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
                     return json_response(self, [row_dict(row) for row in rows])
+            if path == "/api/insights":
+                return self.list_insights(query)
+            if path == "/api/deliverables":
+                return self.list_deliverables(query)
             if path == "/api/memories":
                 return self.list_memories(query)
             if path == "/api/agents":
@@ -1107,8 +1566,10 @@ class Handler(BaseHTTPRequestHandler):
             path, _query = route_parts(self.path)
             if path == "/api/settings":
                 return self.save_settings(read_json(self))
+            if path == "/api/projects":
+                return self.create_project(read_json(self))
             if path == "/api/collections":
-                return self.create_collection(read_json(self))
+                return self.create_project(read_json(self))
             if path.startswith("/api/playbooks/") and path.endswith("/apply"):
                 playbook_id = path.split("/")[-2]
                 return self.apply_playbook(playbook_id)
@@ -1116,6 +1577,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.upload_source()
             if path == "/api/notes":
                 return self.create_note(read_json(self))
+            if path.startswith("/api/notes/") and path.endswith("/organize"):
+                note_id = path.split("/")[-2]
+                return self.organize_note(note_id, read_json(self))
+            if path == "/api/deliverables":
+                return self.create_deliverable(read_json(self))
             if path.startswith("/api/tasks/") and path.endswith("/toggle"):
                 task_id = path.split("/")[-2]
                 return self.toggle_task(task_id)
@@ -1183,10 +1649,12 @@ class Handler(BaseHTTPRequestHandler):
             agents = [public_agent(row) for row in conn.execute("SELECT * FROM agents ORDER BY name")]
             runs = [public_run(row) for row in conn.execute("SELECT agent_runs.*, agents.name AS agent_name FROM agent_runs JOIN agents ON agents.id = agent_runs.agent_id ORDER BY agent_runs.created_at DESC LIMIT 5")]
             connectors = [public_connector(row) for row in conn.execute("SELECT * FROM connectors ORDER BY name")]
+            projects = [public_project(conn, row) for row in conn.execute("SELECT * FROM collections ORDER BY updated_at DESC LIMIT 8")]
             parser_stats = [row_dict(row) for row in conn.execute("SELECT COALESCE(NULLIF(parser_engine, ''), 'unknown') AS engine, count(*) AS count FROM sources GROUP BY engine ORDER BY count DESC")]
             json_response(self, {
                 "counts": counts,
                 "events": events,
+                "projects": projects,
                 "recent_sources": recent,
                 "tasks": tasks,
                 "memories": memories,
@@ -1216,25 +1684,97 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             json_response(self, get_settings(conn))
 
-    def list_collections(self) -> None:
+    def list_projects(self) -> None:
         with connect() as conn:
             rows = conn.execute("SELECT * FROM collections ORDER BY created_at DESC").fetchall()
-            json_response(self, [row_dict(row) for row in rows])
+            json_response(self, [public_project(conn, row) for row in rows])
 
-    def create_collection(self, payload: dict[str, Any]) -> None:
+    def create_project(self, payload: dict[str, Any]) -> None:
         name = str(payload.get("name") or "").strip()
         if not name:
-            return json_response(self, {"detail": "工作区名称不能为空"}, 400)
-        collection_id = str(uuid.uuid4())
+            return json_response(self, {"detail": "项目名称不能为空"}, 400)
+        project_id = str(uuid.uuid4())
         created = now_iso()
         with connect() as conn:
             conn.execute(
                 "INSERT INTO collections(id, name, description, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (collection_id, name[:120], str(payload.get("description") or "").strip(), str(payload.get("color") or "#2f5d46"), created, created),
+                (project_id, name[:120], str(payload.get("goal") or payload.get("description") or "").strip(), str(payload.get("color") or "#2f5d46"), created, created),
             )
-            add_event(conn, "collection", f"已创建工作区：{name[:80]}", "")
-            row = conn.execute("SELECT * FROM collections WHERE id = ?", (collection_id,)).fetchone()
-            json_response(self, row_dict(row))
+            add_event(conn, "project", f"已创建项目：{name[:80]}", str(payload.get("goal") or payload.get("description") or "").strip(), project_id)
+            row = conn.execute("SELECT * FROM collections WHERE id = ?", (project_id,)).fetchone()
+            json_response(self, public_project(conn, row))
+
+    def get_project(self, project_id: str) -> None:
+        with connect() as conn:
+            project = conn.execute("SELECT * FROM collections WHERE id = ?", (project_id,)).fetchone()
+            if not project:
+                return json_response(self, {"detail": "没有找到这个项目"}, HTTPStatus.NOT_FOUND)
+            sources = conn.execute(
+                """
+                SELECT sources.*
+                FROM collection_items ci
+                JOIN sources ON sources.id = ci.item_id
+                WHERE ci.collection_id = ? AND ci.item_type = 'source'
+                ORDER BY sources.created_at DESC
+                LIMIT 8
+                """,
+                (project_id,),
+            ).fetchall()
+            notes = conn.execute(
+                """
+                SELECT notes.*
+                FROM collection_items ci
+                JOIN notes ON notes.id = ci.item_id
+                WHERE ci.collection_id = ? AND ci.item_type = 'note'
+                ORDER BY notes.updated_at DESC
+                LIMIT 8
+                """,
+                (project_id,),
+            ).fetchall()
+            tasks = conn.execute(
+                """
+                SELECT tasks.*
+                FROM collection_items ci
+                JOIN tasks ON tasks.id = ci.item_id
+                WHERE ci.collection_id = ? AND ci.item_type = 'task'
+                ORDER BY tasks.created_at DESC
+                LIMIT 12
+                """,
+                (project_id,),
+            ).fetchall()
+            memories = conn.execute(
+                """
+                SELECT memories.*
+                FROM collection_items ci
+                JOIN memories ON memories.id = ci.item_id
+                WHERE ci.collection_id = ? AND ci.item_type = 'memory'
+                ORDER BY memories.created_at DESC
+                LIMIT 8
+                """,
+                (project_id,),
+            ).fetchall()
+            events = conn.execute(
+                "SELECT * FROM events WHERE project_id = ? ORDER BY created_at DESC LIMIT 16",
+                (project_id,),
+            ).fetchall()
+            insights = conn.execute(
+                "SELECT * FROM insights WHERE project_id = ? ORDER BY created_at DESC LIMIT 16",
+                (project_id,),
+            ).fetchall()
+            deliverables = conn.execute(
+                "SELECT * FROM deliverables WHERE project_id = ? ORDER BY created_at DESC LIMIT 8",
+                (project_id,),
+            ).fetchall()
+            json_response(self, {
+                "project": public_project(conn, project),
+                "sources": [source_summary(row) for row in sources],
+                "notes": [row_dict(row) for row in notes],
+                "tasks": [row_dict(row) for row in tasks],
+                "memories": [row_dict(row) for row in memories],
+                "events": [row_dict(row) for row in events],
+                "insights": [row_dict(row) for row in insights],
+                "deliverables": [row_dict(row) for row in deliverables],
+            })
 
     def list_playbooks(self) -> None:
         with connect() as conn:
@@ -1264,6 +1804,7 @@ class Handler(BaseHTTPRequestHandler):
                     "INSERT INTO tasks(id, title, status, source_type, source_id, created_at, updated_at) VALUES (?, ?, 'open', 'playbook', ?, ?, ?)",
                     (task_id, title, playbook_id, created, created),
                 )
+                link_project_item(conn, collection_id, "task", task_id)
                 task_ids.append(task_id)
             memory_ids = []
             for body in data["memories"]:
@@ -1275,6 +1816,7 @@ class Handler(BaseHTTPRequestHandler):
                     """,
                     (memory_id, safe_title(body[:80]), body, playbook_id, created, created),
                 )
+                link_project_item(conn, collection_id, "memory", memory_id)
                 memory_ids.append(memory_id)
             run_id = str(uuid.uuid4())
             output = (
@@ -1298,7 +1840,7 @@ class Handler(BaseHTTPRequestHandler):
                     created,
                 ),
             )
-            add_event(conn, "playbook", f"已应用场景方案：{data['name']}", data["audience"])
+            add_event(conn, "playbook", f"已应用项目模板：{data['name']}", data["audience"], collection_id)
             json_response(self, {"playbook": data, "collection_id": collection_id, "task_ids": task_ids, "memory_ids": memory_ids, "run_id": run_id})
 
     def upload_source(self) -> None:
@@ -1307,6 +1849,7 @@ class Handler(BaseHTTPRequestHandler):
         if file_item is None or not getattr(file_item, "filename", ""):
             return json_response(self, {"detail": "请选择要导入的文件"}, 400)
         title_value = form.getvalue("title", "")
+        project_id = str(form.getvalue("project_id", "") or "").strip()
         source_id = str(uuid.uuid4())
         original_name = Path(file_item.filename).name
         suffix = Path(original_name).suffix.lower()
@@ -1322,6 +1865,8 @@ class Handler(BaseHTTPRequestHandler):
             existing = conn.execute("SELECT id, title FROM sources WHERE checksum = ?", (checksum,)).fetchone()
             if existing:
                 stored_path.unlink(missing_ok=True)
+                link_project_item(conn, project_id, "source", existing["id"])
+                add_event(conn, "source", f"资料已关联到项目：{existing['title']}", "重复文件未重新导入", project_id)
                 return json_response(self, {"duplicate": True, "source": row_dict(existing)})
 
         text, kind, quality = extract_text(stored_path, original_name, mime_type)
@@ -1362,7 +1907,8 @@ class Handler(BaseHTTPRequestHandler):
                     "INSERT INTO chunks(source_id, chunk_index, title, content, page_start, page_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (source_id, index, source_title, chunk["content"], int(chunk["page_start"] or 0), int(chunk["page_end"] or 0), created),
                 )
-            add_event(conn, "source", f"已导入资料：{source_title}", f"{len(chunks)} 个内容块 · {quality.get('engine', 'unknown')}")
+            link_project_item(conn, project_id, "source", source_id)
+            add_event(conn, "source", f"已导入资料：{source_title}", f"{len(chunks)} 个内容块 · {quality.get('engine', 'unknown')}", project_id)
             source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
             json_response(self, {"duplicate": False, "source": source_summary(source), "chunks": len(chunks)})
 
@@ -1394,12 +1940,14 @@ class Handler(BaseHTTPRequestHandler):
         title_input = str(payload.get("title") or "").strip()
         title_source = "explicit" if title_input and title_input != "无标题" else "empty"
         title = safe_title(title_input) if title_source == "explicit" else "无标题"
+        project_id = str(payload.get("project_id") or "").strip()
         created = now_iso()
         with connect() as conn:
             conn.execute(
                 "INSERT INTO notes(id, title, body, title_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (note_id, title, body, title_source, created, created),
             )
+            link_project_item(conn, project_id, "note", note_id)
             created_tasks = []
             for task_title in extract_tasks(body):
                 task_id = str(uuid.uuid4())
@@ -1407,11 +1955,92 @@ class Handler(BaseHTTPRequestHandler):
                     "INSERT INTO tasks(id, title, status, source_type, source_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (task_id, task_title, "open", "note", note_id, created, created),
                 )
+                link_project_item(conn, project_id, "task", task_id)
                 created_tasks.append(task_title)
             memories = create_memory_candidates(conn, body, "note", note_id)
-            add_event(conn, "note", f"已保存笔记：{title}", f"{len(created_tasks)} 个任务 · {len(memories)} 条待审记忆")
+            for memory_title in memories:
+                memory = conn.execute(
+                    "SELECT id FROM memories WHERE title = ? AND source_type = 'note' AND source_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (memory_title, note_id),
+                ).fetchone()
+                if memory:
+                    link_project_item(conn, project_id, "memory", memory["id"])
+            insights = save_insights(conn, project_id, note_id, extract_insights(body))
+            add_event(conn, "note", f"已保存笔记：{title}", f"{len(created_tasks)} 个任务 · {len(memories)} 条待审记忆 · {len(insights)} 条洞察", project_id)
             note = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
-            json_response(self, {"note": row_dict(note), "tasks": created_tasks, "memories": memories})
+            json_response(self, {"note": row_dict(note), "tasks": created_tasks, "memories": memories, "insights": insights})
+
+    def organize_note(self, note_id: str, payload: dict[str, Any]) -> None:
+        project_id = str(payload.get("project_id") or "").strip()
+        with connect() as conn:
+            note = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+            if not note:
+                return json_response(self, {"detail": "没有找到这条笔记"}, HTTPStatus.NOT_FOUND)
+            if not project_id:
+                linked = conn.execute(
+                    "SELECT collection_id FROM collection_items WHERE item_type = 'note' AND item_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (note_id,),
+                ).fetchone()
+                project_id = linked["collection_id"] if linked else ""
+            conn.execute("DELETE FROM insights WHERE note_id = ? AND (? = '' OR project_id = ?)", (note_id, project_id, project_id))
+            insights = save_insights(conn, project_id, note_id, extract_insights(note["body"]))
+            add_event(conn, "insight", f"已整理笔记：{display_note_title(note)}", f"{len(insights)} 条结构化洞察", project_id)
+            json_response(self, {"note": row_dict(note), "insights": insights})
+
+    def list_insights(self, query: dict[str, list[str]]) -> None:
+        project_id = query.get("project_id", [""])[0]
+        kind = query.get("kind", [""])[0]
+        sql = "SELECT * FROM insights"
+        params: list[Any] = []
+        conditions = []
+        if project_id:
+            conditions.append("project_id = ?")
+            params.append(project_id)
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY created_at DESC"
+        with connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            json_response(self, [row_dict(row) for row in rows])
+
+    def list_deliverables(self, query: dict[str, list[str]]) -> None:
+        project_id = query.get("project_id", [""])[0]
+        sql = "SELECT * FROM deliverables"
+        params: list[Any] = []
+        if project_id:
+            sql += " WHERE project_id = ?"
+            params.append(project_id)
+        sql += " ORDER BY created_at DESC"
+        with connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            json_response(self, [row_dict(row) for row in rows])
+
+    def create_deliverable(self, payload: dict[str, Any]) -> None:
+        project_id = str(payload.get("project_id") or "").strip()
+        template = str(payload.get("template") or "weekly").strip()
+        if not project_id:
+            return json_response(self, {"detail": "请选择项目"}, 400)
+        with connect() as conn:
+            project = conn.execute("SELECT * FROM collections WHERE id = ?", (project_id,)).fetchone()
+            if not project:
+                return json_response(self, {"detail": "没有找到这个项目"}, HTTPStatus.NOT_FOUND)
+            body = build_deliverable(conn, project, template)
+            deliverable_id = str(uuid.uuid4())
+            created = now_iso()
+            title = deliverable_title(project["name"], template)
+            conn.execute(
+                """
+                INSERT INTO deliverables(id, project_id, template, title, body, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (deliverable_id, project_id, template, title, body, created, created),
+            )
+            add_event(conn, "deliverable", f"已生成交付物：{title}", template, project_id)
+            row = conn.execute("SELECT * FROM deliverables WHERE id = ?", (deliverable_id,)).fetchone()
+            json_response(self, row_dict(row))
 
     def toggle_task(self, task_id: str) -> None:
         with connect() as conn:
@@ -1424,12 +2053,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def list_memories(self, query: dict[str, list[str]]) -> None:
         status = query.get("status", [""])[0]
-        sql = "SELECT * FROM memories"
+        project_id = query.get("project_id", [""])[0]
+        sql = "SELECT memories.* FROM memories"
         params: list[Any] = []
+        conditions = []
+        if project_id:
+            sql += " JOIN collection_items ci ON ci.item_id = memories.id"
+            conditions.append("ci.collection_id = ? AND ci.item_type = 'memory'")
+            params.append(project_id)
         if status:
-            sql += " WHERE status = ?"
+            conditions.append("memories.status = ?")
             params.append(status)
-        sql += " ORDER BY created_at DESC"
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY memories.created_at DESC"
         with connect() as conn:
             rows = conn.execute(sql, params).fetchall()
             json_response(self, [row_dict(row) for row in rows])
@@ -1441,6 +2078,7 @@ class Handler(BaseHTTPRequestHandler):
         memory_id = str(uuid.uuid4())
         title = safe_title(str(payload.get("title") or body[:80]))
         status = str(payload.get("status") or "candidate")
+        project_id = str(payload.get("project_id") or "").strip()
         if status not in {"candidate", "approved", "archived"}:
             status = "candidate"
         created = now_iso()
@@ -1452,7 +2090,8 @@ class Handler(BaseHTTPRequestHandler):
                 """,
                 (memory_id, title, body, status, str(payload.get("memory_type") or "fact"), float(payload.get("confidence") or 0.8), created, created),
             )
-            add_event(conn, "memory", f"已保存记忆：{title}", status)
+            link_project_item(conn, project_id, "memory", memory_id)
+            add_event(conn, "memory", f"已保存记忆：{title}", status, project_id)
             row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
             json_response(self, row_dict(row))
 

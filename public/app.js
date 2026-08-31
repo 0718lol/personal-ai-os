@@ -4,7 +4,7 @@ const state = {
   sources: [],
   notes: [],
   tasks: [],
-  collections: [],
+  projects: [],
   playbooks: [],
   memories: [],
   agents: [],
@@ -21,14 +21,16 @@ const state = {
 const NOTE_PAGE_SIZE = 10;
 
 const navItems = [
-  ["home", "首页"],
-  ["playbooks", "场景方案"],
+  ["home", "今日推进"],
+  ["projects", "项目"],
+  ["playbooks", "项目模板"],
   ["sources", "资料库"],
   ["search", "搜索"],
   ["chat", "问答"],
   ["notes", "笔记"],
-  ["collections", "工作区"],
   ["tasks", "任务"],
+  ["decisions", "决策"],
+  ["deliverables", "交付物"],
   ["memories", "记忆"],
   ["agents", "智能体"],
   ["runs", "运行记录"],
@@ -37,9 +39,12 @@ const navItems = [
 ];
 
 const routeAliases = {
-  workspace: "collections",
-  workspaces: "collections",
-  collection: "collections",
+  workspace: "projects",
+  workspaces: "projects",
+  collection: "projects",
+  collections: "projects",
+  project: "projects",
+  projects: "projects",
   library: "sources",
   source: "sources",
   memories_review: "memories",
@@ -47,7 +52,7 @@ const routeAliases = {
 };
 
 const text = {
-  navGroups: ["操作", "整理", "自动化", "系统"],
+  navGroups: ["推进", "项目资料", "自动化", "系统"],
   status: {
     ready: "已就绪",
     empty: "无可抽取文本",
@@ -66,7 +71,8 @@ const text = {
     playbook: "场景方案",
     source: "资料",
     settings: "设置",
-    collection: "工作区",
+    collection: "项目",
+    project: "项目",
     memory: "记忆",
     agent: "智能体",
     chat: "问答",
@@ -324,9 +330,10 @@ function setTitle(kicker, title) {
 
 function renderNav() {
   const groups = [
-    [text.navGroups[0], navItems.slice(0, 5)],
-    [text.navGroups[1], navItems.slice(5, 9)],
-    [text.navGroups[2], navItems.slice(9, 12)],
+    [text.navGroups[0], navItems.slice(0, 3)],
+    [text.navGroups[1], navItems.slice(3, 11)],
+    [text.navGroups[2], navItems.slice(11, 14)],
+    [text.navGroups[3], navItems.slice(13)],
   ];
   $("#nav").innerHTML = groups.map(([label, items]) => `
     <div class="nav-group">
@@ -363,6 +370,40 @@ async function refreshDashboard() {
   state.dashboard = await api("/api/dashboard");
 }
 
+async function loadProjects() {
+  try {
+    return await api("/api/projects");
+  } catch (error) {
+    const legacy = await api("/api/collections");
+    return legacy.map(normalizeLegacyProject);
+  }
+}
+
+function normalizeLegacyProject(project = {}) {
+  const counts = project.counts || {};
+  return {
+    ...project,
+    display_name: project.display_name || project.name || "未命名项目",
+    goal: project.goal || project.description || "",
+    counts: {
+      sources: Number(counts.sources || 0),
+      notes: Number(counts.notes || 0),
+      tasks: Number(counts.tasks || 0),
+      done_tasks: Number(counts.done_tasks || 0),
+      memories: Number(counts.memories || 0),
+      memory_candidates: Number(counts.memory_candidates || 0),
+    },
+    resume: project.resume || {
+      health: "待同步",
+      progress: "后端正在切换到项目推进版本。",
+      next_step: "刷新或等待托管服务重启后，会显示完整项目恢复卡。",
+      blocker: "旧后端暂时不支持项目详情接口。",
+      decision: "暂无明确决策记录。",
+      next_tasks: [],
+    },
+  };
+}
+
 function modelStatusNotice(settings, compact = false, showAction = true) {
   const configured = settings?.api_key_configured === "yes";
   if (configured) {
@@ -383,42 +424,54 @@ function modelStatusNotice(settings, compact = false, showAction = true) {
 }
 
 async function renderHome() {
-  setTitle("指挥中心", "首页");
+  setTitle("项目推进", "今日推进");
   await refreshDashboard();
-  const { counts, recent_sources: recentSources, tasks, memories, agents, runs, connectors, parser_stats: parserStats } = state.dashboard;
+  const { counts, projects = [], tasks, memories, events } = state.dashboard;
+  const focusProjects = projects
+    .filter((project) => project.id !== "inbox")
+    .sort((a, b) => projectPriorityScore(b) - projectPriorityScore(a))
+    .slice(0, 4);
   view.innerHTML = `
     <div class="command-strip">
-      <button class="primary" data-nav="sources">导入资料</button>
-      <button data-nav="playbooks">选择场景方案</button>
-      <button data-nav="chat">向资料库提问</button>
-      <button data-nav="notes">记录笔记</button>
-      <button data-nav="agents">运行智能体</button>
+      <button class="primary" data-nav="projects">新建/打开项目</button>
+      <button data-nav="notes">记录项目进展</button>
+      <button data-nav="sources">添加项目资料</button>
+      <button data-nav="agents">运行推进员</button>
+      <button data-nav="playbooks">套用项目模板</button>
     </div>
     <div class="grid cols-4 home-metrics">
-      ${metric("资料", counts.sources)}
-      ${metric("长期记忆", counts.memories)}
-      ${metric("待办任务", counts.tasks)}
+      ${metric("项目", projects.length)}
+      ${metric("待推进任务", counts.tasks)}
+      ${metric("待确认记忆", counts.memory_candidates)}
       ${metric("解析问题", counts.parse_failures)}
     </div>
-    <div class="grid two balanced-grid" style="margin-top:16px">
-      ${panel("运行队列", `
-        <div class="ops-grid">
-          ${opsTile("资料导入", `${counts.sources} 份资料`, parserStats.length ? parserStats.map((row) => `${row.engine}: ${row.count}`).join(" · ") : "还没有解析记录")}
-          ${opsTile("记忆", `${counts.memory_candidates} 条待审核`, memories.length ? memories.slice(0, 3).map((m) => m.title).join(" · ") : "还没有捕获长期记忆")}
-          ${opsTile("智能体", `${agents.length} 个模板`, agents.map((agent) => tAgentName(agent.name)).join(" · "))}
-          ${opsTile("连接器", `${connectors.filter((c) => c.status === "enabled").length} 个已启用`, connectors.map((c) => `${tConnectorName(c.name)}: ${tStatus(c.status)}`).join(" · "))}
+    <div class="grid two wide-left" style="margin-top:16px">
+      ${panel("优先推进", focusProjects.length ? `
+        <div class="project-board">
+          ${focusProjects.map((project) => projectCard(project)).join("")}
         </div>
-      `)}
-      ${panel("今日任务", tasks.length ? taskList(tasks) : empty("没有待办任务", "在笔记里写 TODO: 或 待办: 可以自动生成任务。"))}
+      ` : empty("还没有项目", "先创建一个项目，后续资料、笔记、任务和记忆都会围绕它组织。"), `<button data-nav="projects">管理项目</button>`)}
+      ${panel("今日下一步", tasks.length ? taskList(tasks.slice(0, 6)) : empty("没有待办任务", "在项目笔记里写 TODO: 可以自动创建下一步。"))}
     </div>
     <div class="grid two balanced-grid" style="margin-top:16px">
-      ${panel("最近资料", recentSources.length ? listSources(recentSources, false) : empty("还没有资料", "导入文档后，会开始建立你的本地上下文层。"))}
-      ${panel("最近运行", runs.length ? runList(runs) : empty("还没有运行记录", "可以在智能体页面运行研究、计划、资料审核或记忆审核。"))}
+      ${panel("待确认上下文", memories.length ? memoryList(memories.filter((memory) => memory.status === "candidate").slice(0, 4)) : empty("没有待审记忆", "项目关键事实和决策会先进审核箱，避免静默污染上下文。"))}
+      ${panel("项目时间线", events.length ? timelineList(events.slice(0, 8)) : empty("还没有活动", "导入资料、记录笔记、运行智能体后，这里会形成可追溯时间线。"))}
     </div>
   `;
-  bindSourceButtons();
   bindTaskButtons();
+  bindProjectButtons();
+  bindMemoryButtons();
   bindInlineNav();
+}
+
+function projectPriorityScore(project) {
+  const counts = project.counts || {};
+  let score = 0;
+  if (!counts.tasks) score += 40;
+  if (counts.memory_candidates) score += 20;
+  if (counts.sources && !counts.notes) score += 15;
+  score += Math.min(Number(counts.tasks || 0), 8);
+  return score;
 }
 
 function metric(label, value) {
@@ -427,6 +480,65 @@ function metric(label, value) {
 
 function opsTile(title, value, body) {
   return `<div class="ops-tile"><div class="tag">${escapeHtml(title)}</div><div class="ops-value">${escapeHtml(value)}</div><div class="small">${escapeHtml(body)}</div></div>`;
+}
+
+function projectCard(project, compact = false) {
+  const resume = project.resume || {};
+  const counts = project.counts || {};
+  return `
+    <article class="item project-card">
+      <div class="item-row">
+        <div>
+          <div class="item-title">${escapeHtml(tCollectionName(project.display_name || project.name))}</div>
+          <div class="meta">${escapeHtml(resume.health || "待推进")} · ${counts.tasks || 0} 个下一步 · ${counts.sources || 0} 份资料 · ${counts.notes || 0} 条笔记</div>
+        </div>
+        <button class="ghost" data-project="${project.id}">打开</button>
+      </div>
+      ${project.goal ? `<p>${escapeHtml(project.goal)}</p>` : ""}
+      ${resumeCard(resume, compact)}
+    </article>
+  `;
+}
+
+function resumeCard(resume = {}, compact = false) {
+  return `
+    <div class="resume-card">
+      <div>
+        <span class="tag">上次进展</span>
+        <p>${escapeHtml(resume.progress || "还没有可恢复的项目状态。")}</p>
+      </div>
+      <div>
+        <span class="tag">下一步</span>
+        <p>${escapeHtml(resume.next_step || "补一条 TODO，明确最小下一步。")}</p>
+      </div>
+      ${compact ? "" : `
+        <div>
+          <span class="tag">卡点</span>
+          <p>${escapeHtml(resume.blocker || "暂无明确卡点。")}</p>
+        </div>
+        <div>
+          <span class="tag">最近决策</span>
+          <p>${escapeHtml(resume.decision || "暂无明确决策记录。")}</p>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function timelineList(events) {
+  return `<div class="timeline">${events.map((event) => `
+    <article class="timeline-item">
+      <div class="item-title">${escapeHtml(event.title)}</div>
+      <div class="meta">${tStatus(event.kind)} · ${formatDate(event.created_at)}</div>
+      ${event.detail ? `<p>${escapeHtml(event.detail)}</p>` : ""}
+    </article>
+  `).join("")}</div>`;
+}
+
+function bindProjectButtons() {
+  document.querySelectorAll("[data-project]").forEach((button) => {
+    button.addEventListener("click", () => navigate("projects", button.dataset.project));
+  });
 }
 
 function bindInlineNav() {
@@ -495,15 +607,26 @@ function qualitySummary(source) {
   return bits.length ? `<div class="evidence-summary">${bits.map((bit) => `<span class="tag">${escapeHtml(bit)}</span>`).join("")}</div>` : "";
 }
 
+function projectSelect(id, label = "所属项目") {
+  return `
+    <label class="small" for="${escapeHtml(id)}">${escapeHtml(label)}</label>
+    <select id="${escapeHtml(id)}">
+      <option value="">不挂项目</option>
+      ${state.projects.map((project) => `<option value="${project.id}">${escapeHtml(tCollectionName(project.display_name || project.name))}</option>`).join("")}
+    </select>
+  `;
+}
+
 async function renderSources() {
   setTitle("采集", "资料库");
-  state.sources = await api("/api/sources");
+  [state.sources, state.projects] = await Promise.all([api("/api/sources"), loadProjects()]);
   view.innerHTML = `
     <div class="grid two">
       <div class="grid">
         ${panel("导入", `
           <form id="upload-form" class="upload-box form-stack">
             <input id="upload-title" placeholder="可选标题" />
+            ${projectSelect("upload-project", "选择所属项目")}
             <input id="upload-file" class="visually-hidden-file" type="file" accept=".txt,.md,.markdown,.pdf,.csv,.json" required />
             <div class="file-picker">
               <label class="file-button" for="upload-file">选择文件</label>
@@ -529,7 +652,7 @@ async function renderSources() {
 }
 
 async function renderPlaybooks() {
-  setTitle("选择场景", "场景方案");
+  setTitle("项目启动", "项目模板");
   state.playbooks = await api("/api/playbooks");
   view.innerHTML = `
     <div class="grid cols-3">
@@ -548,7 +671,7 @@ async function renderPlaybooks() {
             <div class="tool-row">
               ${playbook.agents.map((agent) => `<span class="tag">${escapeHtml(tAgentName(agent))}</span>`).join("")}
             </div>
-            <button class="primary" data-playbook="${playbook.id}">应用方案</button>
+            <button class="primary" data-playbook="${playbook.id}">创建项目骨架</button>
           </div>
         </article>
       `).join("")}
@@ -558,66 +681,182 @@ async function renderPlaybooks() {
     button.addEventListener("click", async () => {
       button.textContent = "正在应用...";
       const result = await api(`/api/playbooks/${button.dataset.playbook}/apply`, { method: "POST" });
-      state.view = "runs";
+      state.view = "projects";
       renderNav();
-      await renderRuns(result.run_id);
+      await renderProjects(result.collection_id);
     });
   });
 }
 
-async function renderCollections() {
-  setTitle("整理", "工作区");
-  state.collections = await api("/api/collections");
+async function renderProjects(selectedId = "") {
+  setTitle("项目推进", "项目");
+  state.projects = await loadProjects();
+  const selectedProject = selectedId ? await loadProjectDetail(selectedId) : null;
   view.innerHTML = `
-    <div class="grid two">
-      ${panel("创建工作区", `
-        <form id="collection-form" class="form-stack">
-          <input id="collection-name" placeholder="工作区名称" />
-          <textarea id="collection-description" placeholder="用途、范围，以及哪些资料应该放进来"></textarea>
-          <div class="split-actions"><button class="primary" type="submit">创建工作区</button></div>
-          <div id="collection-status" class="small"></div>
-        </form>
-      `)}
-      ${panel("已有工作区", state.collections.length ? `
-        <div class="list">
-          ${state.collections.map((collection) => `
-            <article class="item">
-              <div class="item-row">
-                <div>
-                  <div class="item-title">${escapeHtml(tCollectionName(collection.name))}</div>
-                  <div class="meta">${formatDate(collection.created_at)}</div>
-                </div>
-                <span class="swatch" style="background:${escapeHtml(collection.color)}"></span>
-              </div>
-              <p>${escapeHtml(collection.description || "暂无说明")}</p>
-            </article>
-          `).join("")}
-        </div>
-      ` : empty("还没有工作区", "可以应用一个场景方案，或为项目、主题、客户创建工作区。"))}
+    <div class="grid two wide-left">
+      <div class="grid">
+        ${panel("创建项目", `
+          <form id="project-form" class="form-stack">
+            <input id="project-name" placeholder="项目名称，例如：新产品冷启动、客户 A 官网改版、电子书写作" />
+            <textarea id="project-goal" placeholder="项目目标、完成标准、关键约束"></textarea>
+            <div class="split-actions"><button class="primary" type="submit">创建项目</button></div>
+            <div id="project-status" class="small"></div>
+          </form>
+        `)}
+        ${panel("项目列表", state.projects.length ? `
+          <div class="project-board">
+            ${state.projects.map((project) => projectCard(project)).join("")}
+          </div>
+        ` : empty("还没有项目", "创建第一个项目后，资料、笔记、任务和记忆都会围绕它形成状态。"))}
+      </div>
+      ${selectedProject ? projectDetail(selectedProject) : panel("项目恢复卡", empty("选择一个项目", "打开项目后，可以看到上次进展、当前卡点、下一步、资料、笔记和时间线。"))}
     </div>
   `;
-  $("#collection-form").addEventListener("submit", saveCollection);
+  $("#project-form").addEventListener("submit", saveProject);
+  bindProjectButtons();
+  bindSourceButtons();
+  bindTaskButtons();
 }
 
-async function saveCollection(event) {
-  event.preventDefault();
-  const name = $("#collection-name").value.trim();
-  if (!name) return;
-  const status = $("#collection-status");
+async function loadProjectDetail(projectId) {
   try {
-    await api("/api/collections", {
+    return await api(`/api/projects/${projectId}`);
+  } catch (error) {
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) throw error;
+    return {
+      project: normalizeLegacyProject(project),
+      sources: [],
+      notes: [],
+      tasks: [],
+      memories: [],
+      events: [],
+      insights: [],
+      deliverables: [],
+    };
+  }
+}
+
+function projectDetail(detail) {
+  const project = detail.project;
+  return panel(tCollectionName(project.display_name || project.name), `
+    <div class="project-detail">
+      ${project.goal ? `<p class="project-goal">${escapeHtml(project.goal)}</p>` : ""}
+      ${resumeCard(project.resume)}
+      <div class="grid cols-4 compact-metrics">
+        ${metric("资料", project.counts.sources || 0)}
+        ${metric("笔记", project.counts.notes || 0)}
+        ${metric("待办", project.counts.tasks || 0)}
+        ${metric("记忆", project.counts.memories || 0)}
+      </div>
+      <div class="toolbar project-actions">
+        <button data-nav="sources">添加资料</button>
+        <button data-nav="notes">记录进展</button>
+        <button data-nav="agents">运行推进员</button>
+      </div>
+      <div class="project-sections">
+        ${sectionBlock("下一步任务", detail.tasks.length ? taskList(detail.tasks) : empty("没有任务", "在项目笔记里写 TODO: 可以自动创建任务。"))}
+        ${sectionBlock("结构化洞察", detail.insights?.length ? insightList(detail.insights) : empty("没有洞察", "整理项目笔记后，会提取决策、问题、风险和行动。"))}
+        ${sectionBlock("交付物", detail.deliverables?.length ? deliverableMiniList(detail.deliverables) : empty("没有交付物", "可以在交付物页生成周报、计划、复盘或客户汇报。"))}
+        ${sectionBlock("最近资料", detail.sources.length ? listSources(detail.sources, false) : empty("没有资料", "把项目文档、客户材料、链接摘录或 PDF 导入进来。"))}
+        ${sectionBlock("最近笔记", detail.notes.length ? noteMiniList(detail.notes) : empty("没有笔记", "记录进展、决策、问题和待办。"))}
+        ${sectionBlock("时间线", detail.events.length ? timelineList(detail.events) : empty("没有活动", "项目活动会自动进入时间线。"))}
+      </div>
+    </div>
+  `);
+}
+
+function insightList(insights) {
+  return `<div class="list">${insights.map((insight) => `
+    <article class="item">
+      <div class="item-row">
+        <div>
+          <div class="item-title">${escapeHtml(insight.title)}</div>
+          <div class="meta">${escapeHtml(insightKindLabel(insight.kind))} · 置信度 ${Number(insight.confidence || 0).toFixed(2)} · ${formatDate(insight.created_at)}</div>
+          <p>${escapeHtml(insight.body)}</p>
+        </div>
+        <span class="tag">${escapeHtml(insight.status || "open")}</span>
+      </div>
+    </article>
+  `).join("")}</div>`;
+}
+
+function insightKindLabel(kind) {
+  return {
+    decision: "决策",
+    question: "问题",
+    risk: "风险",
+    follow_up: "跟进",
+    action: "行动",
+  }[kind] || kind;
+}
+
+function deliverableMiniList(deliverables) {
+  return `<div class="list">${deliverables.map((item) => `
+    <article class="item">
+      <div class="item-title">${escapeHtml(item.title)}</div>
+      <div class="meta">${escapeHtml(deliverableTemplateLabel(item.template))} · ${formatDate(item.created_at)}</div>
+      <pre class="run-output">${escapeHtml(String(item.body || "").slice(0, 700))}</pre>
+    </article>
+  `).join("")}</div>`;
+}
+
+function deliverableTemplateLabel(template) {
+  return {
+    weekly: "项目周报",
+    plan: "下一步计划",
+    review: "项目复盘",
+    client: "客户汇报",
+    risk: "风险清单",
+  }[template] || template;
+}
+
+function sectionBlock(title, body) {
+  return `
+    <section class="section-block">
+      <h3>${escapeHtml(title)}</h3>
+      ${body}
+    </section>
+  `;
+}
+
+function noteMiniList(notes) {
+  return `<div class="list">${notes.map((note) => `
+    <article class="item">
+      <div class="item-title">${escapeHtml(displayNoteTitle(note))}</div>
+      <div class="meta">${formatDate(note.updated_at)}</div>
+      <p>${escapeHtml(notePreview(note))}</p>
+    </article>
+  `).join("")}</div>`;
+}
+
+async function saveProject(event) {
+  event.preventDefault();
+  const name = $("#project-name").value.trim();
+  if (!name) return;
+  const status = $("#project-status");
+  try {
+    const project = await api("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, description: $("#collection-description").value }),
+      body: JSON.stringify({ name, goal: $("#project-goal").value }),
     });
     status.textContent = "已创建。";
-    showToast("工作区已创建");
-    await renderCollections();
+    showToast("项目已创建");
+    await renderProjects(project.id);
   } catch (error) {
     status.textContent = userMessage(error);
     status.className = "small error";
     showToast(userMessage(error), "error");
   }
+}
+
+async function renderCollections(selectedId = "") {
+  return renderProjects(selectedId);
+}
+
+async function saveCollection(event) {
+  return saveProject(event);
 }
 
 function sourceViewer() {
@@ -658,6 +897,7 @@ async function uploadSource(event) {
   const data = new FormData();
   data.append("file", fileInput.files[0]);
   data.append("title", $("#upload-title").value);
+  data.append("project_id", $("#upload-project")?.value || "");
   status.textContent = "正在导入并抽取文本...";
   try {
     const result = await api("/api/sources/upload", { method: "POST", body: data });
@@ -803,13 +1043,14 @@ async function askQuestion(event) {
 
 async function renderNotes() {
   setTitle("采集", "笔记");
-  state.notes = await api("/api/notes");
+  [state.notes, state.projects] = await Promise.all([api("/api/notes"), loadProjects()]);
   view.innerHTML = `
     <div class="grid two notes-grid">
       ${panel("快速笔记", `
         <form id="note-form" class="form-stack">
           <input id="note-title" placeholder="标题" />
-          <textarea id="note-body" placeholder="写一条笔记。以 TODO: 或 待办: 开头的行会自动变成任务；以 记忆: 开头的行会进入记忆审核。"></textarea>
+          ${projectSelect("note-project", "选择所属项目")}
+          <textarea id="note-body" placeholder="记录项目进展。TODO: 会变成任务；决策: 会进入恢复卡；问题: 会变成卡点；记忆: 会进入审核箱。"></textarea>
           <div class="split-actions"><button type="submit" class="primary">保存笔记</button></div>
           <div id="note-status" class="small"></div>
         </form>
@@ -878,9 +1119,13 @@ function renderNoteResults() {
           <span class="note-preview">${escapeHtml(notePreview(note))}</span>
         </summary>
         <div class="note-body">${escapeHtml(note.body)}</div>
+        <div class="toolbar note-actions">
+          <button class="ghost" data-organize-note="${note.id}" type="button">整理洞察</button>
+        </div>
       </details>
     `).join("")}</div>
   ` : empty("没有匹配笔记", "换个关键词再试。");
+  bindOrganizeNoteButtons();
 }
 
 function displayNoteTitle(note) {
@@ -903,7 +1148,7 @@ async function saveNote(event) {
     const result = await api("/api/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: $("#note-title").value.trim() || "无标题", body }),
+      body: JSON.stringify({ title: $("#note-title").value.trim() || "无标题", body, project_id: $("#note-project")?.value || "" }),
     });
     const createdBits = [];
     if (result.tasks?.length) createdBits.push(`${result.tasks.length} 个任务`);
@@ -919,6 +1164,28 @@ async function saveNote(event) {
     status.className = "small error";
     showToast(userMessage(error), "error");
   }
+}
+
+function bindOrganizeNoteButtons() {
+  document.querySelectorAll("[data-organize-note]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "整理中...";
+      try {
+        const result = await api(`/api/notes/${button.dataset.organizeNote}/organize`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        showToast(`已提取 ${result.insights.length} 条洞察`);
+      } catch (error) {
+        showToast(userMessage(error), "error");
+      } finally {
+        button.disabled = false;
+        button.textContent = "整理洞察";
+      }
+    });
+  });
 }
 
 async function renderTasks() {
@@ -958,9 +1225,107 @@ function bindTaskButtons() {
   });
 }
 
+async function renderDecisions() {
+  setTitle("项目判断", "决策");
+  [state.notes, state.memories] = await Promise.all([api("/api/notes"), api("/api/memories")]);
+  const noteDecisions = state.notes.flatMap((note) => extractDecisionLines(note).map((decision) => ({
+    title: decision,
+    source: displayNoteTitle(note),
+    created_at: note.updated_at,
+    body: note.body,
+  })));
+  const memoryDecisions = state.memories
+    .filter((memory) => memory.status === "approved" && /决策|决定|原则|约束/.test(`${memory.title} ${memory.body}`))
+    .map((memory) => ({
+      title: memory.title,
+      source: "已批准记忆",
+      created_at: memory.updated_at,
+      body: memory.body,
+    }));
+  const decisions = [...noteDecisions, ...memoryDecisions].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  view.innerHTML = `
+    ${panel("决策日志", decisions.length ? `
+      <div class="list">
+        ${decisions.map((decision) => `
+          <article class="item">
+            <div class="item-title">${escapeHtml(decision.title)}</div>
+            <div class="meta">${escapeHtml(decision.source)} · ${formatDate(decision.created_at)}</div>
+            <p>${escapeHtml(String(decision.body || "").slice(0, 220))}</p>
+          </article>
+        `).join("")}
+      </div>
+    ` : empty("还没有决策", "在项目笔记里写“决策: 选择方案 A，因为...”即可进入决策日志和项目恢复卡。"))}
+  `;
+}
+
+function extractDecisionLines(note) {
+  return String(note.body || "").split(/\r?\n/)
+    .map((line) => line.trim())
+    .map((line) => line.match(/^(?:[-*]\s*)?(?:决策|决定|DECISION)[:：](.+)$/i))
+    .filter(Boolean)
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+}
+
+async function renderDeliverables() {
+  setTitle("输出", "交付物");
+  state.projects = await loadProjects();
+  const projectId = state.projects[0]?.id || "";
+  const deliverables = projectId ? await api(`/api/deliverables?project_id=${encodeURIComponent(projectId)}`) : [];
+  view.innerHTML = `
+    <div class="grid two wide-left">
+      ${panel("生成交付物", `
+        <form id="deliverable-form" class="form-stack">
+          ${projectSelect("deliverable-project", "选择项目")}
+          <label class="small" for="deliverable-template">模板</label>
+          <select id="deliverable-template">
+            <option value="weekly">项目周报</option>
+            <option value="plan">下一步计划</option>
+            <option value="review">项目复盘</option>
+            <option value="client">客户汇报</option>
+            <option value="risk">风险清单</option>
+          </select>
+          <div class="split-actions"><button class="primary" type="submit">生成 Markdown</button></div>
+          <div id="deliverable-status" class="small"></div>
+        </form>
+      `)}
+      ${panel("最近交付物", deliverables.length ? deliverableMiniList(deliverables) : empty("还没有交付物", "选择项目和模板后，可以生成可复制的 Markdown。"))}
+    </div>
+  `;
+  const select = $("#deliverable-project");
+  if (select && projectId) select.value = projectId;
+  $("#deliverable-form").addEventListener("submit", createDeliverable);
+}
+
+async function createDeliverable(event) {
+  event.preventDefault();
+  const status = $("#deliverable-status");
+  const projectId = $("#deliverable-project").value;
+  if (!projectId) {
+    status.textContent = "请选择项目。";
+    status.className = "small error";
+    return;
+  }
+  status.textContent = "正在生成...";
+  try {
+    const item = await api("/api/deliverables", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, template: $("#deliverable-template").value }),
+    });
+    status.innerHTML = `已生成：${escapeHtml(item.title)}`;
+    showToast("交付物已生成");
+    await renderDeliverables();
+  } catch (error) {
+    status.textContent = userMessage(error);
+    status.className = "small error";
+    showToast(userMessage(error), "error");
+  }
+}
+
 async function renderMemories() {
   setTitle("长期上下文", "记忆");
-  state.memories = await api("/api/memories");
+  [state.memories, state.projects] = await Promise.all([api("/api/memories"), loadProjects()]);
   const candidates = state.memories.filter((memory) => memory.status === "candidate");
   const approved = state.memories.filter((memory) => memory.status === "approved");
   const archived = state.memories.filter((memory) => memory.status === "archived");
@@ -970,6 +1335,7 @@ async function renderMemories() {
       ${panel("新增记忆", `
         <form id="memory-form" class="form-stack">
           <input id="memory-title" placeholder="标题" />
+          ${projectSelect("memory-project", "选择所属项目")}
           <textarea id="memory-body" placeholder="偏好、项目事实、决策或长期上下文"></textarea>
           <div class="toolbar">
             <select id="memory-status">
@@ -1019,7 +1385,7 @@ async function saveMemory(event) {
     await api("/api/memories", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: $("#memory-title").value, body, status: $("#memory-status").value }),
+      body: JSON.stringify({ title: $("#memory-title").value, body, status: $("#memory-status").value, project_id: $("#memory-project")?.value || "" }),
     });
     $("#memory-title").value = "";
     $("#memory-body").value = "";
@@ -1173,6 +1539,16 @@ async function renderSettings() {
     <div class="grid two">
       ${panel("模型服务", `
         ${modelStatusNotice(settings, false, false)}
+        <div class="local-model-box">
+          <div class="item-row">
+            <div>
+              <div class="item-title">本地模型自动发现</div>
+              <div class="small">检测 Ollama、LM Studio、LocalAI、Jan 等 OpenAI-compatible 本地服务。</div>
+            </div>
+            <button id="discover-models" type="button">扫描本地模型</button>
+          </div>
+          <div id="model-discovery-results" class="model-discovery-results"></div>
+        </div>
         <form id="settings-form" class="form-stack">
           <label class="small">Base URL</label>
           <input id="settings-base-url" value="${escapeHtml(settings.base_url)}" />
@@ -1194,6 +1570,58 @@ async function renderSettings() {
     </div>
   `;
   $("#settings-form").addEventListener("submit", saveSettings);
+  $("#discover-models").addEventListener("click", discoverModels);
+}
+
+async function discoverModels() {
+  const button = $("#discover-models");
+  const results = $("#model-discovery-results");
+  button.disabled = true;
+  button.textContent = "扫描中...";
+  results.innerHTML = `<div class="small">正在检查常见本地模型端口...</div>`;
+  try {
+    const discovery = await api("/api/models/discover");
+    if (!discovery.found?.length) {
+      results.innerHTML = `
+        <div class="notice">
+          <div class="notice-title">没有发现正在运行的本地模型服务</div>
+          <p>可以先启动 Ollama、LM Studio、LocalAI 或 Jan，并确认它们开放 OpenAI-compatible API。</p>
+        </div>
+      `;
+      return;
+    }
+    results.innerHTML = `
+      <div class="list">
+        ${discovery.found.map((item, index) => `
+          <article class="item">
+            <div class="item-row">
+              <div>
+                <div class="item-title">${escapeHtml(item.provider)} · ${escapeHtml(item.model)}</div>
+                <div class="meta">${escapeHtml(item.base_url)} · ${item.models.length} 个模型</div>
+                <div class="tool-row">${item.models.slice(0, 6).map((model) => `<span class="tag">${escapeHtml(model)}</span>`).join("")}</div>
+              </div>
+              <button class="primary" data-local-model="${index}" type="button">使用</button>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    `;
+    results.querySelectorAll("[data-local-model]").forEach((itemButton) => {
+      itemButton.addEventListener("click", () => applyDiscoveredModel(discovery.found[Number(itemButton.dataset.localModel)]));
+    });
+  } catch (error) {
+    results.innerHTML = `<div class="small error">${escapeHtml(userMessage(error))}</div>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "扫描本地模型";
+  }
+}
+
+function applyDiscoveredModel(item) {
+  $("#settings-base-url").value = item.base_url;
+  $("#settings-model").value = item.model;
+  $("#settings-api-key").value = item.api_key || "local";
+  showToast(`已填入 ${item.provider} / ${item.model}，点击保存设置后生效`);
 }
 
 async function saveSettings(event) {
@@ -1234,8 +1662,11 @@ async function navigate(viewName, payload = "") {
     if (viewName === "search") await renderSearch(payload);
     if (viewName === "chat") await renderChat();
     if (viewName === "notes") await renderNotes();
-    if (viewName === "collections") await renderCollections();
+    if (viewName === "projects") await renderProjects(payload);
+    if (viewName === "collections") await renderCollections(payload);
     if (viewName === "tasks") await renderTasks();
+    if (viewName === "decisions") await renderDecisions();
+    if (viewName === "deliverables") await renderDeliverables();
     if (viewName === "memories") await renderMemories();
     if (viewName === "agents") await renderAgents();
     if (viewName === "runs") await renderRuns();

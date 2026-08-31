@@ -72,7 +72,8 @@ button.danger {
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -90,6 +91,7 @@ textarea {
 
 input:focus,
 textarea:focus,
+select:focus,
 button:focus-visible {
   outline: 2px solid rgba(49, 95, 119, 0.32);
   outline-offset: 2px;
@@ -382,6 +384,100 @@ h3 {
   font-size: 24px;
 }
 
+.project-board {
+  display: grid;
+  gap: 12px;
+}
+
+.project-card {
+  display: grid;
+  gap: 12px;
+}
+
+.project-card p,
+.project-goal {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.resume-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #cfd9d1;
+  border-radius: 7px;
+  background: #f8faf7;
+}
+
+.resume-card div {
+  min-width: 0;
+}
+
+.resume-card p {
+  margin: 7px 0 0;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.project-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.project-actions {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(238, 243, 238, 0.6);
+}
+
+.project-sections {
+  display: grid;
+  gap: 12px;
+}
+
+.section-block {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.section-block h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.compact-metrics {
+  gap: 10px;
+}
+
+.compact-metrics .metric {
+  min-height: 82px;
+  padding: 12px;
+  box-shadow: none;
+}
+
+.compact-metrics .metric-value {
+  font-size: 28px;
+}
+
+.timeline-item {
+  padding: 10px 12px;
+  border-left: 3px solid var(--blueprint);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.timeline-item p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .timeline,
 .list {
   display: grid;
@@ -587,6 +683,21 @@ h3 {
 
 .notice button {
   justify-self: start;
+}
+
+.local-model-box {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(248, 250, 247, 0.86);
+}
+
+.model-discovery-results {
+  display: grid;
+  gap: 10px;
 }
 
 .swatch {
@@ -851,7 +962,8 @@ h3 {
 
   .grid.cols-4,
   .grid.cols-3,
-  .ops-grid {
+  .ops-grid,
+  .resume-card {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -874,7 +986,8 @@ h3 {
   .grid.cols-3,
   .grid.two,
   .grid.two.wide-left,
-  .ops-grid {
+  .ops-grid,
+  .resume-card {
     grid-template-columns: 1fr;
   }
 
