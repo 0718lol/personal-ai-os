@@ -80,6 +80,12 @@ PORT=8000 ./start.sh
 http://localhost:8000
 ```
 
+测试时可以通过 `PERSONAL_AI_OS_DATA_DIR` 指定独立数据目录，避免污染默认工作区：
+
+```bash
+PERSONAL_AI_OS_DATA_DIR=/tmp/personal-ai-os-test python3 -m unittest discover -s tests -q
+```
+
 如果你在 ASteam 产品托管环境里运行，`app.toml` 已经配置好入口，平台会自动注入 `$PORT` 并托管服务。
 
 ## 模型配置

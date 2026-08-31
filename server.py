@@ -29,7 +29,7 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("PERSONAL_AI_OS_DATA_DIR", str(ROOT / "data"))).expanduser()
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "personal_ai_os.sqlite3"
 
@@ -511,7 +511,7 @@ def link_project_item(conn: sqlite3.Connection, project_id: str, item_type: str,
         return
     project = conn.execute("SELECT id FROM collections WHERE id = ?", (project_id,)).fetchone()
     if not project:
-        return
+        raise ValueError("项目不存在")
     conn.execute(
         """
         INSERT OR IGNORE INTO collection_items(collection_id, item_type, item_id, created_at)
@@ -1861,56 +1861,60 @@ class Handler(BaseHTTPRequestHandler):
         source_title = safe_title(original_name, title_value)
         created = now_iso()
 
-        with connect() as conn:
-            existing = conn.execute("SELECT id, title FROM sources WHERE checksum = ?", (checksum,)).fetchone()
-            if existing:
-                stored_path.unlink(missing_ok=True)
-                link_project_item(conn, project_id, "source", existing["id"])
-                add_event(conn, "source", f"资料已关联到项目：{existing['title']}", "重复文件未重新导入", project_id)
-                return json_response(self, {"duplicate": True, "source": row_dict(existing)})
+        try:
+            with connect() as conn:
+                existing = conn.execute("SELECT id, title FROM sources WHERE checksum = ?", (checksum,)).fetchone()
+                if existing:
+                    stored_path.unlink(missing_ok=True)
+                    link_project_item(conn, project_id, "source", existing["id"])
+                    add_event(conn, "source", f"资料已关联到项目：{existing['title']}", "重复文件未重新导入", project_id)
+                    return json_response(self, {"duplicate": True, "source": row_dict(existing)})
 
-        text, kind, quality = extract_text(stored_path, original_name, mime_type)
-        status = "ready" if text else "empty"
-        error = "" if text else ("PDF 解析器没有抽取到可用文本。" if kind == "pdf" else "没有找到可抽取文本。")
-        chunks = evidence_chunks(text, kind)
-        quality = enrich_quality(quality, chunks, kind)
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO sources(id, title, original_name, kind, mime_type, file_path, checksum, size_bytes,
-                                    status, error, text_content, parser_engine, page_count, char_count, quality_json,
-                                    created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    source_id,
-                    source_title,
-                    original_name,
-                    kind,
-                    mime_type,
-                    str(stored_path),
-                    checksum,
-                    len(content),
-                    status,
-                    error,
-                    text,
-                    str(quality.get("engine") or ""),
-                    int(quality.get("page_count") or 0),
-                    len(text),
-                    json.dumps(quality, ensure_ascii=False),
-                    created,
-                    created,
-                ),
-            )
-            for index, chunk in enumerate(chunks):
+            text, kind, quality = extract_text(stored_path, original_name, mime_type)
+            status = "ready" if text else "empty"
+            error = "" if text else ("PDF 解析器没有抽取到可用文本。" if kind == "pdf" else "没有找到可抽取文本。")
+            chunks = evidence_chunks(text, kind)
+            quality = enrich_quality(quality, chunks, kind)
+            with connect() as conn:
                 conn.execute(
-                    "INSERT INTO chunks(source_id, chunk_index, title, content, page_start, page_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (source_id, index, source_title, chunk["content"], int(chunk["page_start"] or 0), int(chunk["page_end"] or 0), created),
+                    """
+                    INSERT INTO sources(id, title, original_name, kind, mime_type, file_path, checksum, size_bytes,
+                                        status, error, text_content, parser_engine, page_count, char_count, quality_json,
+                                        created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_id,
+                        source_title,
+                        original_name,
+                        kind,
+                        mime_type,
+                        str(stored_path),
+                        checksum,
+                        len(content),
+                        status,
+                        error,
+                        text,
+                        str(quality.get("engine") or ""),
+                        int(quality.get("page_count") or 0),
+                        len(text),
+                        json.dumps(quality, ensure_ascii=False),
+                        created,
+                        created,
+                    ),
                 )
-            link_project_item(conn, project_id, "source", source_id)
-            add_event(conn, "source", f"已导入资料：{source_title}", f"{len(chunks)} 个内容块 · {quality.get('engine', 'unknown')}", project_id)
-            source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
-            json_response(self, {"duplicate": False, "source": source_summary(source), "chunks": len(chunks)})
+                for index, chunk in enumerate(chunks):
+                    conn.execute(
+                        "INSERT INTO chunks(source_id, chunk_index, title, content, page_start, page_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (source_id, index, source_title, chunk["content"], int(chunk["page_start"] or 0), int(chunk["page_end"] or 0), created),
+                    )
+                link_project_item(conn, project_id, "source", source_id)
+                add_event(conn, "source", f"已导入资料：{source_title}", f"{len(chunks)} 个内容块 · {quality.get('engine', 'unknown')}", project_id)
+                source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+                json_response(self, {"duplicate": False, "source": source_summary(source), "chunks": len(chunks)})
+        except Exception:
+            stored_path.unlink(missing_ok=True)
+            raise
 
     def get_source(self, source_id: str) -> None:
         with connect() as conn:
