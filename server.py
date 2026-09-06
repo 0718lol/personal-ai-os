@@ -9,17 +9,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import warnings
 import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-
-warnings.simplefilter("ignore", DeprecationWarning)
-import cgi
-warnings.resetwarnings()
 
 try:
     from pypdf import PdfReader
@@ -41,12 +37,20 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect() -> sqlite3.Connection:
+@contextmanager
+def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def ensure_db() -> None:
@@ -1465,7 +1469,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
-            ensure_db()
             path, query = route_parts(self.path)
             if path == "/api/health":
                 return json_response(self, {"status": "ok", "time": now_iso()})
@@ -1562,7 +1565,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
-            ensure_db()
             path, _query = route_parts(self.path)
             if path == "/api/settings":
                 return self.save_settings(read_json(self))
@@ -1604,7 +1606,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         try:
-            ensure_db()
             path, _query = route_parts(self.path)
             if path.startswith("/api/sources/"):
                 return self.delete_source(path.rsplit("/", 1)[-1])
@@ -1843,21 +1844,66 @@ class Handler(BaseHTTPRequestHandler):
             add_event(conn, "playbook", f"已应用项目模板：{data['name']}", data["audience"], collection_id)
             json_response(self, {"playbook": data, "collection_id": collection_id, "task_ids": task_ids, "memory_ids": memory_ids, "run_id": run_id})
 
+    def parse_multipart(self) -> dict:
+        """Parse multipart/form-data into {field: value}, files as dicts
+        with filename/type/content. Replacement for the removed cgi module
+        (Python 3.13+)."""
+        content_type = self.headers.get("content-type", "")
+        form: dict = {}
+        if not content_type.startswith("multipart/form-data"):
+            return form
+        boundary_match = re.search(r'boundary=("?)([^";]+)\1', content_type)
+        if not boundary_match:
+            return form
+        length = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(length) if length else b""
+        delimiter = b"--" + boundary_match.group(2).encode("utf-8")
+        for raw_part in body.split(delimiter)[1:]:
+            if raw_part.startswith(b"--"):
+                continue  # closing delimiter
+            part = raw_part
+            if part.startswith(b"\r\n"):
+                part = part[2:]
+            if part.endswith(b"\r\n"):
+                part = part[:-2]
+            header_blob, separator, value = part.partition(b"\r\n\r\n")
+            if not separator:
+                continue
+            headers = {}
+            for line in header_blob.decode("utf-8", "replace").split("\r\n"):
+                name, _, header_value = line.partition(":")
+                headers[name.strip().lower()] = header_value.strip()
+            disposition = headers.get("content-disposition", "")
+            name_match = re.search(r'name="([^"]*)"', disposition)
+            if not name_match:
+                continue
+            field = name_match.group(1)
+            filename_match = re.search(r'filename="([^"]*)"', disposition)
+            if filename_match:
+                form[field] = {
+                    "filename": filename_match.group(1),
+                    "type": headers.get("content-type") or "",
+                    "content": value,
+                }
+            else:
+                form[field] = value.decode("utf-8", "replace")
+        return form
+
     def upload_source(self) -> None:
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST"})
-        file_item = form["file"] if "file" in form else None
-        if file_item is None or not getattr(file_item, "filename", ""):
+        form = self.parse_multipart()
+        file_item = form.get("file")
+        if not isinstance(file_item, dict) or not file_item["filename"]:
             return json_response(self, {"detail": "请选择要导入的文件"}, 400)
-        title_value = form.getvalue("title", "")
-        project_id = str(form.getvalue("project_id", "") or "").strip()
+        title_value = form.get("title", "")
+        project_id = str(form.get("project_id", "") or "").strip()
         source_id = str(uuid.uuid4())
-        original_name = Path(file_item.filename).name
+        original_name = Path(file_item["filename"]).name
         suffix = Path(original_name).suffix.lower()
         stored_path = UPLOAD_DIR / f"{source_id}{suffix}"
-        content = file_item.file.read()
+        content = file_item["content"]
         stored_path.write_bytes(content)
         checksum = hashlib.sha256(content).hexdigest()
-        mime_type = file_item.type or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+        mime_type = file_item["type"] or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
         source_title = safe_title(original_name, title_value)
         created = now_iso()
 
@@ -2198,10 +2244,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    init_db()
+    ensure_db()
     port = int(os.environ.get("PORT", "8000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"Personal AI OS listening on 0.0.0.0:{port}")
+    host = os.environ.get("HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Personal AI OS listening on {host}:{port}")
     server.serve_forever()
 
 
