@@ -1957,7 +1957,8 @@ class Handler(BaseHTTPRequestHandler):
                     stored_path.unlink(missing_ok=True)
                     link_project_item(conn, project_id, "source", existing["id"])
                     add_event(conn, "source", f"资料已关联到项目：{existing['title']}", "重复文件未重新导入", project_id)
-                    return json_response(self, {"duplicate": True, "source": row_dict(existing)})
+            if existing:
+                return json_response(self, {"duplicate": True, "source": row_dict(existing)})
 
             text, kind, quality = extract_text(stored_path, original_name, mime_type)
             status = "ready" if text else "empty"
@@ -2016,7 +2017,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     add_event(conn, "wiki", "wiki 页面更新失败", str(exc)[:200], project_id)
                 source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
-                json_response(self, {"duplicate": False, "source": source_summary(source), "chunks": len(chunks)})
+            json_response(self, {"duplicate": False, "source": source_summary(source), "chunks": len(chunks)})
         except Exception:
             stored_path.unlink(missing_ok=True)
             raise
