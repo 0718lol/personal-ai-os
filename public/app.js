@@ -325,8 +325,33 @@ function showToast(message, tone = "success") {
 }
 
 function setTitle(kicker, title) {
+  view.dataset.page = state.view;
   $("#view-kicker").textContent = kicker;
   $("#view-title").textContent = title;
+}
+
+const iconPaths = {
+  home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z"/>',
+  projects: '<rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V4h8v3M3 12h18M10 12v3h4v-3"/>',
+  playbooks: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  sources: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+  wiki: '<path d="M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15"/>',
+  search: '<circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/>',
+  chat: '<path d="M21 11a8 8 0 0 1-8 8H7l-4 3V6a3 3 0 0 1 3-3h7a8 8 0 0 1 8 8Z"/><path d="M7 8h9M7 12h6"/>',
+  notes: '<path d="M14 3H5v18h14V8Zm0 0v5h5M8 12h8M8 16h5"/>',
+  tasks: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="m7 12 3 3 7-7"/>',
+  decisions: '<path d="M12 3v18M5 7h14M5 7l-3 7h6L5 7Zm14 0-3 7h6l-3-7ZM7 21h10"/>',
+  deliverables: '<path d="M4 7h16v14H4ZM3 3h18v4H3ZM9 12h6"/>',
+  memories: '<path d="M12 4C7-1 1 5 5 9c-5 3-1 10 4 8 0 5 7 5 7 0 5 2 9-5 4-8 4-4-2-10-8-5Zm0 0v16M7 8l5 2 5-2M6 14l6-2 6 2"/>',
+  agents: '<rect x="3" y="7" width="18" height="14" rx="4"/><path d="M12 3v4M8 12v2M16 12v2M8 18h8"/>',
+  runs: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l4 2"/>',
+  connectors: '<path d="m8 8 8 8M7 3l4 4-4 4-4-4Zm10 10 4 4-4 4-4-4Z"/>',
+  settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="16" cy="17" r="3"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  arrow: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
+};
+function uiIcon(name, className = "") {
+  return `<svg class="ui-icon ${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name] || iconPaths.notes}</svg>`;
 }
 
 function renderNav() {
@@ -340,8 +365,8 @@ function renderNav() {
     <div class="nav-group">
       <div class="nav-label">${label}</div>
       ${items.map(([key, itemLabel]) => `
-        <button class="${state.view === key ? "active" : ""}" data-nav="${key}">
-          <span>${itemLabel}</span>
+        <button class="${state.view === key ? "active" : ""}" data-nav="${key}" aria-current="${state.view === key ? "page" : "false"}">
+          ${uiIcon(key)}<span>${itemLabel}</span>${state.view === key ? '<i class="nav-active-dot"></i>' : ""}
         </button>
       `).join("")}
     </div>
@@ -490,10 +515,10 @@ function projectCard(project, compact = false) {
     <article class="item project-card">
       <div class="item-row">
         <div>
-          <div class="item-title">${escapeHtml(tCollectionName(project.display_name || project.name))}</div>
+          <div class="project-card-heading"><span class="project-symbol">${uiIcon(project.id === "inbox" ? "sources" : "projects")}</span><div class="item-title">${escapeHtml(tCollectionName(project.display_name || project.name))}</div></div>
           <div class="meta">${escapeHtml(resume.health || "待推进")} · ${counts.tasks || 0} 个下一步 · ${counts.sources || 0} 份资料 · ${counts.notes || 0} 条笔记</div>
         </div>
-        <button class="ghost" data-project="${project.id}">打开</button>
+        <button class="ghost project-open" data-project="${project.id}" aria-label="打开${escapeHtml(tCollectionName(project.display_name || project.name))}">打开 ${uiIcon("arrow")}</button>
       </div>
       ${project.goal ? `<p>${escapeHtml(project.goal)}</p>` : ""}
       ${resumeCard(resume, compact)}
@@ -691,33 +716,28 @@ async function renderPlaybooks() {
 }
 
 async function renderProjects(selectedId = "") {
-  setTitle("项目推进", "项目");
+  setTitle("工作空间 / 项目", "我的项目");
   state.projects = await loadProjects();
   const selectedProject = selectedId ? await loadProjectDetail(selectedId) : null;
+  const active = state.projects.filter(p => p.id !== "inbox");
+  const total = key => state.projects.reduce((n, p) => n + Number(p.counts?.[key] || 0), 0);
   view.innerHTML = `
-    <div class="grid two wide-left">
-      <div class="grid">
-        ${panel("创建项目", `
-          <form id="project-form" class="form-stack">
-            <input id="project-name" placeholder="项目名称，例如：新产品冷启动、客户 A 官网改版、电子书写作" />
-            <textarea id="project-goal" placeholder="项目目标、完成标准、关键约束"></textarea>
-            <div class="split-actions"><button class="primary" type="submit">创建项目</button></div>
-            <div id="project-status" class="small"></div>
-          </form>
-        `)}
-        ${panel("项目列表", state.projects.length ? `
-          <div class="project-board">
-            ${state.projects.map((project) => projectCard(project)).join("")}
-          </div>
-        ` : empty("还没有项目", "创建第一个项目后，资料、笔记、任务和记忆都会围绕它形成状态。"))}
+    <section class="workspace-hero">
+      <div class="hero-copy"><span class="eyebrow">YOUR IDEAS, IN MOTION</span><h2>让每一个想法，<br>都有下一步<span>。</span></h2><p>收好资料，理清思路。把零散的灵感，变成持续推进的项目。</p><button class="primary" id="focus-new-project">${uiIcon("plus")}新建项目</button><button class="hero-secondary" data-nav="playbooks">从模板开始 ${uiIcon("arrow")}</button></div>
+      <div class="hero-visual" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="hero-note note-back">${uiIcon("sources")}<span>收集灵感</span><i></i><i></i></div><div class="hero-note note-front"><span class="hero-note-icon">${uiIcon("wiki")}</span><strong>让知识连接起来</strong><span class="note-line"></span><span class="note-line short"></span><div class="note-footer"><span class="tiny-dot"></span> 一点一滴，持续生长 ${uiIcon("arrow")}</div></div><span class="hero-spark spark-one">✧</span><span class="hero-spark spark-two">+</span></div>
+    </section>
+    <div class="project-overview"><div>${uiIcon("projects")}<span>我的项目</span><strong>${active.length}</strong></div><div>${uiIcon("sources")}<span>已收集资料</span><strong>${total("sources")}</strong></div><div>${uiIcon("tasks")}<span>待推进任务</span><strong>${total("tasks")}</strong></div><div>${uiIcon("notes")}<span>项目笔记</span><strong>${total("notes")}</strong></div></div>
+    <div class="projects-layout ${selectedProject ? "has-detail" : ""}">
+      <div class="projects-main"><div class="section-heading"><div><span class="eyebrow">PROJECT LIBRARY</span><h2>你的项目空间 <span>${state.projects.length}</span></h2></div><span class="small">资料、进展与下一步，都在这里</span></div>
+        <div class="project-board">${state.projects.map(project => projectCard(project, true)).join("") || empty("从一个小目标开始", "创建第一个项目，把资料和行动组织起来。")}</div>
+        ${selectedProject ? `<div class="selected-project-detail">${projectDetail(selectedProject)}</div>` : `<section class="project-guide"><span class="guide-icon">${uiIcon("wiki")}</span><div><h3>项目，是知识的生长容器</h3><p>导入一份资料，记下一条想法，或写下一项 TODO。每次回来，都能接着上次的进度。</p><button class="text-button" data-nav="sources">去收集第一份资料 ${uiIcon("arrow")}</button></div></section>`}
       </div>
-      ${selectedProject ? projectDetail(selectedProject) : panel("项目恢复卡", empty("选择一个项目", "打开项目后，可以看到上次进展、当前卡点、下一步、资料、笔记和时间线。"))}
+      <aside class="project-create">${panel("开启一个新项目", `<p class="form-intro">不必一开始就想清楚所有细节。<br>给它一个名字，然后开始。</p><form id="project-form" class="form-stack"><label for="project-name">项目名称</label><input id="project-name" placeholder="例如：我的研究笔记" required maxlength="200"><label for="project-goal">想要完成什么 <span class="small">选填</span></label><textarea id="project-goal" placeholder="记下目标，或者此刻的一个想法…" rows="4"></textarea><button class="primary" type="submit">${uiIcon("plus")}创建项目</button><div id="project-status" class="small" role="status"></div></form>`)}<div class="project-tip">${uiIcon("playbooks")}<div><strong>还没有头绪？</strong><p>用一个现成模板，开始你的研究、创作或产品计划。</p><button class="text-button" data-nav="playbooks">浏览项目模板 ${uiIcon("arrow")}</button></div></div></aside>
     </div>
   `;
   $("#project-form").addEventListener("submit", saveProject);
-  bindProjectButtons();
-  bindSourceButtons();
-  bindTaskButtons();
+  $("#focus-new-project").addEventListener("click", () => { $("#project-name").scrollIntoView({behavior:"smooth", block:"center"}); $("#project-name").focus({preventScroll:true}); });
+  bindProjectButtons(); bindSourceButtons(); bindTaskButtons(); bindInlineNav();
 }
 
 async function loadProjectDetail(projectId) {

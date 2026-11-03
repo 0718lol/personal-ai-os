@@ -5,21 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
-    <title>个人项目推进器</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20261103-wiki" />
+    <title>知序 · 个人知识工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=20261103-design" />
   </head>
   <body>
     <div id="app" class="shell">
       <aside class="sidebar" aria-label="主导航">
         <div class="brand">
-          <div class="brand-mark">AI</div>
-          <div>
-            <div class="brand-name">个人项目推进器 <span class="brand-version">本地版</span></div>
-            <div class="brand-subtitle">资料、知识页面与项目行动</div>
-          </div>
-          <button class="brand-settings" data-nav="settings" type="button">设置</button>
+          <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="m6 8 10-4 10 4v17l-10-4-10 4V8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 4v17M10 11l3-1M19 10l3 1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+          <div><div class="brand-name">知序<span class="brand-version">AI</span></div><div class="brand-subtitle">个人知识工作台</div></div>
         </div>
         <nav class="nav" id="nav"></nav>
+        <div class="sidebar-footer"><span class="workspace-avatar">W</span><div><strong>我的工作空间</strong><span><i></i> 本地存储 · 随时继续</span></div><span class="workspace-more" aria-hidden="true">⌘</span></div>
       </aside>
 
       <main class="main">
@@ -29,8 +26,8 @@
             <h1 id="view-title">首页</h1>
           </div>
           <form class="global-search" id="global-search">
-            <input id="global-search-input" type="search" placeholder="搜索资料、笔记、任务" autocomplete="off" />
-            <button type="submit" title="搜索">搜索</button>
+            <label class="search-icon" for="global-search-input"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span class="sr-only">搜索工作空间</span></label><input id="global-search-input" type="search" placeholder="搜索资料、笔记、任务" autocomplete="off" />
+            <button type="submit" title="搜索">搜索 <span aria-hidden="true">↵</span></button>
           </form>
         </header>
 
@@ -45,6 +42,6 @@
       </div>
     </template>
 
-    <script src="/assets/app.js?v=20261103-wiki" type="module"></script>
+    <script src="/assets/app.js?v=20261103-design" type="module"></script>
   </body>
 </html>
