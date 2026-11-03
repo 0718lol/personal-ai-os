@@ -331,6 +331,20 @@ def init_db() -> None:
               created_at TEXT NOT NULL,
               resolved_at TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS wiki_lint_states (
+              issue_key TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS wiki_claims (
+              id TEXT PRIMARY KEY,
+              page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+              chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+              source_id TEXT NOT NULL,
+              text TEXT NOT NULL,
+              confidence TEXT NOT NULL DEFAULT 'medium',
+              created_at TEXT NOT NULL
+            );
             """
         )
         note_columns = {row["name"] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
@@ -1584,6 +1598,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.wiki_lint()
             if path == "/api/wiki/settings":
                 return self.wiki_settings_get()
+            if path.startswith("/api/wiki/pages/") and path.endswith("/memories"):
+                return self.wiki_page_memories(urllib.parse.unquote(path.split("/")[-2]))
             if path.startswith("/api/wiki/pages/"):
                 return self.wiki_get_page(urllib.parse.unquote(path.rsplit("/", 1)[-1]))
             return self.static_file(path)
@@ -1629,6 +1645,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.chat(read_json(self))
             if path == "/api/wiki/rebuild":
                 return self.wiki_rebuild(read_json(self))
+            if path == "/api/wiki/lint/status":
+                return self.wiki_lint_status(read_json(self))
             if path == "/api/wiki/propose":
                 return self.wiki_propose(read_json(self))
             if path == "/api/wiki/settings":
@@ -2349,6 +2367,23 @@ class Handler(BaseHTTPRequestHandler):
     def wiki_lint(self) -> None:
         with connect() as conn:
             json_response(self, wiki.lint(conn))
+    def wiki_lint_status(self, payload: dict[str, Any]) -> None:
+        issue_key = str(payload.get("key") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        if not issue_key:
+            return json_response(self, {"detail": "key 不能为空"}, 400)
+        with connect() as conn:
+            try:
+                result = wiki.set_lint_status(conn, issue_key, status)
+            except (ValueError, LookupError) as exc:
+                return json_response(self, {"detail": str(exc)}, 400)
+        json_response(self, result)
+    def wiki_page_memories(self, slug: str) -> None:
+        with connect() as conn:
+            page = conn.execute("SELECT * FROM wiki_pages WHERE slug = ?", (slug,)).fetchone()
+            if page is None:
+                return json_response(self, {"detail": "没有找到这个页面"}, HTTPStatus.NOT_FOUND)
+            json_response(self, {"slug": slug, "memories": wiki.page_memories(conn, page)})
 
     def wiki_rebuild(self, payload: dict[str, Any]) -> None:
         dry_run = bool(payload.get("dry_run"))

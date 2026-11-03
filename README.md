@@ -138,6 +138,7 @@ API key 存在本地运行数据中，不写入源码。
 personal-ai-os/
 ├── public/              # 前端界面
 ├── server.py            # Python 后端和 SQLite API
+├── mcp_server.py        # 只读 MCP server（stdio JSON-RPC）
 ├── pdf_extract_node.mjs # Node PDF 解析回退
 ├── requirements.txt     # Python 依赖
 ├── package.json         # Node 依赖
@@ -168,6 +169,39 @@ personal-ai-os/
 人工维护的页面不会被自动整理覆盖。页面正文变化后，旧提案会被拦截，请丢弃并重新生成。早期没有保存正文基线的旧队列也需重新生成。
 
 检索使用原文 FTS、中文双字 FTS、字符哈希向量和 RRF；哈希向量不具备真实语义理解。问答区显示低置信与拒答状态，且只显示当前回答的引用。无答案合成评测中，4/10 拒答、6/10 低置信作答，不能把低置信提示当作答案正确。
+
+## 只读 MCP 接口
+`mcp_server.py` 通过 stdio JSON-RPC（MCP 协议）把知识库以只读方式暴露给 MCP 客户端（如 Claude Desktop、Cursor 等）：
+
+- `wiki_search`：门控检索，返回置信档（confident/low/abstain）与证据片段
+- `wiki_read_page`：读取页面正文、证据、结论与修订历史
+- `wiki_list_pages`：列出全部知识页面
+- `wiki_lint`：列出知识检查问题及处理状态
+
+启动（数据目录与主服务一致，默认 `data/`）：
+
+```bash
+.venv/bin/python mcp_server.py
+```
+
+MCP 客户端配置示例（command 按实际路径调整）：
+
+```json
+{
+  "mcpServers": {
+    "personal-ai-os": {
+      "command": "/path/to/personal-ai-os/.venv/bin/python",
+      "args": ["/path/to/personal-ai-os/mcp_server.py"],
+      "env": { "PERSONAL_AI_OS_DATA_DIR": "/path/to/personal-ai-os/data" }
+    }
+  }
+}
+```
+
+说明：
+- 数据库以 SQLite 只读模式打开，不提供任何写操作工具。
+- 服务未启动或数据库不存在时，工具调用会返回错误文本。
+- 回归测试见 `tests/test_mcp_server.py`。
 
 ## 验证与数据边界
 

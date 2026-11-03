@@ -33,6 +33,7 @@ LINK_RE = re.compile(r"\[\[([^\]\[]+)\]\]")
 ENT_RE = re.compile(r"[A-Za-z][A-Za-z0-9+#/\.]{1,}")
 SLUG_BAD = re.compile(r"[\\/:*?\"<>|\s]+")
 MAX_ENTITIES_PER_SOURCE = 12
+CLAIMS_PER_PAGE = 5
 QUOTE_LEN = 160
 SNIPPET_LEN = 110
 
@@ -345,6 +346,7 @@ def _apply_plan(
         if auto_apply:
             page_id, _ = _write_page(conn, entry, origin="auto")
             _set_evidence(conn, page_id, pairs)
+            _set_claims(conn, page_id, pairs)
             _record_changeset(conn, entry, change["action"], change["diff"], pairs, status="applied")
             _log(change["action"], change["slug"], entry.get("note", ""))
         else:
@@ -407,6 +409,33 @@ def _set_evidence(conn: sqlite3.Connection, page_id: str, pairs: list) -> None:
             "INSERT OR IGNORE INTO wiki_evidence(page_id, chunk_id, source_id, quote, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (page_id, pair["chunk_id"], pair["source_id"], pair["quote"], created),
+        )
+
+def _set_claims(conn: sqlite3.Connection, page_id: str, pairs: list) -> None:
+    """从证据 chunk 抽取结论级 claim(数值+单位→high,含数字→medium,其余→low)。"""
+    conn.execute("DELETE FROM wiki_claims WHERE page_id = ?", (page_id,))
+    created = now_iso()
+    for pair in pairs[:CLAIMS_PER_PAGE]:
+        chunk = conn.execute("SELECT content FROM chunks WHERE id = ?", (pair["chunk_id"],)).fetchone()
+        if chunk is None:
+            continue
+        text, confidence = "", "low"
+        for sent in _key_sentences(chunk["content"], limit=4):
+            if NUM_UNIT_RE.search(sent):
+                text, confidence = sent, "high"
+                break
+            if re.search(r"\d", sent) and not text:
+                text, confidence = sent, "medium"
+        if not text:
+            head = _key_sentences(chunk["content"], limit=1)
+            if head:
+                text, confidence = head[0], "low"
+        if not text:
+            continue
+        conn.execute(
+            "INSERT INTO wiki_claims(id, page_id, chunk_id, source_id, text, confidence, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), page_id, pair["chunk_id"], pair["source_id"], text, confidence, created),
         )
 
 
@@ -554,7 +583,9 @@ def resolve_op(conn: sqlite3.Connection, op_id: str, apply: bool) -> dict[str, A
     page_id, action = _write_page(conn, entry, origin=origin)
     if op["source"] == "compile":
         try:
-            _set_evidence(conn, page_id, payload.get("evidence", []))
+            evidence = payload.get("evidence", [])
+            _set_evidence(conn, page_id, evidence)
+            _set_claims(conn, page_id, evidence)
         except ValueError:
             pass
     conn.execute(
@@ -636,8 +667,31 @@ def lint(conn: sqlite3.Connection) -> dict[str, Any]:
             issues.append({"type": "empty_page", "severity": "warning", "slug": page["slug"], "detail": "没有证据支撑"})
         issues.extend(_suspected_conflicts(page, ev_rows))
 
+    states = {
+        row["issue_key"]: row["status"]
+        for row in conn.execute("SELECT issue_key, status FROM wiki_lint_states").fetchall()
+    }
+    for issue in issues:
+        issue["key"] = f"{issue['type']}|{issue['slug']}|{issue['detail']}"
+        issue["status"] = states.get(issue["key"], "open")
     summary = Counter(i["type"] for i in issues)
-    return {"pages": len(pages), "issues": issues, "summary": dict(summary), "clean": not issues}
+    open_count = sum(1 for i in issues if i["status"] == "open")
+    return {"pages": len(pages), "issues": issues, "summary": dict(summary),
+            "open_count": open_count, "clean": open_count == 0}
+
+
+def set_lint_status(conn: sqlite3.Connection, issue_key: str, status: str) -> dict[str, Any]:
+    """持久化 lint 处理状态(open/resolved/ignored);只接受当前存在的提示。"""
+    if status not in {"open", "resolved", "ignored"}:
+        raise ValueError("status 必须是 open / resolved / ignored 之一")
+    if issue_key not in {i["key"] for i in lint(conn)["issues"]}:
+        raise LookupError("没有找到这条检查提示")
+    conn.execute(
+        "INSERT INTO wiki_lint_states(issue_key, status, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(issue_key) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+        (issue_key, status, now_iso()),
+    )
+    return {"key": issue_key, "status": status}
 
 
 def _suspected_conflicts(page: sqlite3.Row, ev_rows: list) -> list[dict[str, str]]:
@@ -788,6 +842,15 @@ def get_page(conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
             (page["id"],),
         )
     ]
+    data["claims"] = [
+        dict(r) for r in conn.execute(
+            "SELECT cl.id, cl.text, cl.confidence, cl.chunk_id, cl.source_id, c.page_start, c.page_end, s.title AS source_title "
+            "FROM wiki_claims cl JOIN chunks c ON c.id = cl.chunk_id "
+            "JOIN sources s ON s.id = cl.source_id WHERE cl.page_id = ? ORDER BY cl.created_at",
+            (page["id"],),
+        )
+    ]
+    data["memories"] = page_memories(conn, page)
     data["revisions"] = [
         dict(r) for r in conn.execute(
             "SELECT rev, note, created_at FROM wiki_revisions WHERE page_id = ? ORDER BY rev", (page["id"],)
@@ -806,3 +869,23 @@ def pending_ops(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         "SELECT * FROM wiki_pending_ops WHERE status = 'pending' ORDER BY created_at"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def page_memories(conn: sqlite3.Connection, page: sqlite3.Row) -> list[dict[str, Any]]:
+    """按 wiki 页面聚合相关记忆:标题/别名分词命中,或记忆来源与页面证据来源相同。"""
+    terms: set[str] = set()
+    for text in [page["title"], *_page_aliases(page)]:
+        for part in re.split(r"[^\w\u4e00-\u9fff]+", text.lower()):
+            if len(part) >= 2 and part not in STOP_ENTITIES:
+                terms.add(part)
+    src_ids = {
+        r["source_id"] for r in conn.execute(
+            "SELECT source_id FROM wiki_evidence WHERE page_id = ?", (page["id"],)
+        )
+    }
+    matched: dict[str, dict[str, Any]] = {}
+    for m in conn.execute("SELECT * FROM memories ORDER BY created_at DESC").fetchall():
+        text = f"{m['title']} {m['body']}".lower()
+        if (m["source_id"] and m["source_id"] in src_ids) or any(t in text for t in terms):
+            matched[m["id"]] = dict(m)
+    return list(matched.values())

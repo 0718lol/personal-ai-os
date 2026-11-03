@@ -1735,7 +1735,7 @@ async function renderWiki(slug = "") {
   const e = escapeHtml;
   const link = (s, title = s) => `<button type="button" data-wiki-page="${e(s)}">${e(title)}</button>`;
   view.innerHTML = `
-    <div class="toolbar"><span>${pages.length} 个页面 · ${pending.length} 条待审 · ${lint.issues.length} 项检查提示</span><button id="wiki-refresh">刷新</button><button id="wiki-rebuild">整理资料</button></div>
+    <div class="toolbar"><span>${pages.length} 个页面 · ${pending.length} 条待审 · ${lint.open_count} 项待处理提示</span><button id="wiki-refresh">刷新</button><button id="wiki-rebuild">整理资料</button></div>
     <p class="small">上传资料后自动整理为知识页面。人工修订经审核发布后保留，历史正文可回滚。</p>
     <label class="wiki-setting"><input id="wiki-auto" type="checkbox" ${settings.auto_apply ? "checked" : ""}> 自动发布资料整理结果（关闭后进入待审队列）</label>
     <div class="wiki-layout">
@@ -1744,13 +1744,15 @@ async function renderWiki(slug = "") {
         <p class="small">${page.origin === "manual" ? "人工维护" : page.origin === "redirect" ? "重定向" : "自动整理"} · ${e(page.updated_at)}</p>
         <pre class="wiki-body">${e(page.body).replace(/\[\[([^\]]+)\]\]/g, (_, target) => link(target, `[[${target}]]`))}</pre>
         <details><summary>原文证据（${page.evidence.length}）</summary>${page.evidence.map(ev => `<article class="wiki-evidence"><button data-wiki-source="${e(ev.source_id)}">${e(ev.source_title)} · 第 ${ev.page_start}–${ev.page_end} 页</button>${ev.superseded ? '<strong class="error"> 已被新版取代</strong>' : ""}<p>${e(ev.quote)}</p></article>`).join("") || '<p class="small">此页面暂无原文证据。</p>'}</details>
+        <details><summary>结论要点（${page.claims.length}）</summary>${page.claims.map(cl => `<article class="wiki-evidence"><p>${e(cl.text)}</p><p class="small">${e(cl.source_title)} · 第 ${cl.page_start}–${cl.page_end} 页 · 置信 ${e(({high:"高",medium:"中",low:"低"})[cl.confidence] || cl.confidence)}</p></article>`).join("") || '<p class="small">此页面暂无结论要点。</p>'}</details>
+        <details><summary>相关记忆（${page.memories.length}）</summary>${page.memories.map(m => `<article class="wiki-evidence"><p><strong>${e(m.title)}</strong> <span class="small">${e(m.status)} · ${e(m.memory_type)}</span></p><p>${e(m.body)}</p></article>`).join("") || '<p class="small">暂无与该页面相关的记忆。</p>'}</details>
         <p>出链：${page.links_out.map(s => link(s)).join(" ") || "无"}</p><p>入链：${page.links_in.map(s => link(s)).join(" ") || "无"}</p>
         <details><summary>修订正文（先进入审核队列）</summary><form id="wiki-edit"><label>标题<input name="title" value="${e(page.title)}" required></label><label>正文<textarea name="body" rows="12" required>${e(page.body)}</textarea></label><label>修改说明<input name="note" placeholder="本次修改原因"></label><button class="primary">生成待审差异</button></form></details>
         <details><summary>正文历史与回滚</summary><p class="small">回滚会产生新版本；恢复范围为历史正文。</p>${page.revisions.map(r => `<div class="toolbar"><span>版本 ${r.rev} · ${e(r.note)} · ${e(r.created_at)}</span><button data-wiki-rev="${r.rev}">恢复此正文</button></div>`).join("")}</details>` : empty("选择一个页面", "点击左侧目录阅读正文、核对原文证据或提交修订。"))}
     </div>
     ${panel(`待审修改（${pending.length}）`, pending.map(op => `<details class="wiki-op"><summary>${e(op.proposed_title)} · ${e(({create:"新建",update:"更新",delete:"删除"})[op.op_type] || op.op_type)}</summary><p>${e(op.note)}</p><pre class="wiki-diff">${e(op.diff_text)}</pre><details><summary>完整拟发布正文</summary><pre class="wiki-body">${e(op.proposed_body)}</pre></details><div class="toolbar"><button class="primary" data-wiki-op="${e(op.id)}" data-action="apply">批准发布${op.op_type === "delete" ? "删除" : ""}</button><button data-wiki-op="${e(op.id)}" data-action="discard">丢弃</button></div></details>`).join("") || '<p class="small">没有待审修改。</p>')}
     ${panel("生成带出处的材料", `<form id="wiki-compose"><label>材料标题<input name="title" required placeholder="例如：本周研究进展"></label><label>类型<select name="template"><option value="outline">提纲</option><option value="weekly">周报素材</option><option value="study">学习材料</option></select></label><fieldset><legend>选择知识页面</legend><div class="wiki-picks">${pages.filter(p => p.origin !== "redirect").map(p => `<label><input type="checkbox" name="slug" value="${e(p.slug)}"> ${e(p.title)}</label>`).join("") || "请先导入资料"}</div></fieldset><p class="small">按所选页面的原文证据抽取要点，请核对后使用。</p><button class="primary" ${pages.length ? "" : "disabled"}>预览材料</button></form><div id="wiki-compose-result"></div>`)}
-    ${panel("知识检查", lint.issues.map(i => `<p><strong>${e(i.severity === "error" ? "错误" : "提示")}</strong> ${link(i.slug)} · ${e(i.detail)}</p>`).join("") || '<p class="small">未发现断链、孤立页、陈旧证据或疑似矛盾。</p>')}
+    ${panel(`知识检查（${lint.open_count} 项待处理）`, lint.issues.map(i => `<p><strong>${e(i.severity === "error" ? "错误" : "提示")}</strong> ${link(i.slug)} · ${e(i.detail)} ${i.status !== "open" ? `<span class="tag">${e(i.status === "ignored" ? "已忽略" : "已解决")}</span>` : ""} ${i.status === "open" ? `<button data-lint-key="${e(i.key)}" data-lint-status="ignored">忽略</button>` : `<button data-lint-key="${e(i.key)}" data-lint-status="open">恢复</button>`}</p>`).join("") || '<p class="small">未发现断链、孤立页、陈旧证据或疑似矛盾。</p>')}
   `;
   bindInlineNav();
   const action = (selector, fn) => view.querySelectorAll(selector).forEach(el => el.addEventListener("click", async () => {
@@ -1772,6 +1774,10 @@ async function renderWiki(slug = "") {
   action("[data-wiki-op]", async el => {
     await wikiPost(`ops/${encodeURIComponent(el.dataset.wikiOp)}/${el.dataset.action}`);
     await navigate("wiki"); showToast(el.dataset.action === "apply" ? "修改已发布" : "修改已丢弃");
+  });
+  action("[data-lint-key]", async el => {
+    await wikiPost("lint/status", {key: el.dataset.lintKey, status: el.dataset.lintStatus});
+    await navigate("wiki", slug); showToast(el.dataset.lintStatus === "ignored" ? "提示已忽略" : "提示已恢复");
   });
   action("[data-wiki-rev]", async el => {
     if (!window.confirm(`将「${page.title}」正文恢复至版本 ${el.dataset.wikiRev}？当前正文会保留为历史版本。`)) return;
