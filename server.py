@@ -17,6 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import retrieval
+import wiki
+
 try:
     from pypdf import PdfReader
 except Exception:
@@ -56,6 +59,7 @@ def connect():
 def ensure_db() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
+    wiki.init(DATA_DIR)
     init_db()
 
 
@@ -269,6 +273,64 @@ def init_db() -> None:
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_bigram USING fts5(
+              body,
+              chunk_id UNINDEXED
+            );
+
+            CREATE TABLE IF NOT EXISTS chunk_vectors (
+              chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+              dim INTEGER NOT NULL,
+              vector BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS wiki_pages (
+              id TEXT PRIMARY KEY,
+              slug TEXT NOT NULL UNIQUE,
+              title TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              body TEXT NOT NULL DEFAULT '',
+              origin TEXT NOT NULL DEFAULT 'auto',
+              aliases TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS wiki_evidence (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+              chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+              source_id TEXT NOT NULL,
+              quote TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              UNIQUE(page_id, chunk_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS wiki_revisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+              rev INTEGER NOT NULL,
+              body TEXT NOT NULL,
+              note TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              UNIQUE(page_id, rev)
+            );
+
+            CREATE TABLE IF NOT EXISTS wiki_pending_ops (
+              id TEXT PRIMARY KEY,
+              slug TEXT NOT NULL,
+              op_type TEXT NOT NULL,
+              proposed_title TEXT NOT NULL DEFAULT '',
+              proposed_body TEXT NOT NULL DEFAULT '',
+              diff_text TEXT NOT NULL DEFAULT '',
+              note TEXT NOT NULL DEFAULT '',
+              source TEXT NOT NULL DEFAULT 'agent',
+              payload TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TEXT NOT NULL,
+              resolved_at TEXT NOT NULL DEFAULT ''
+            );
             """
         )
         note_columns = {row["name"] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
@@ -280,6 +342,13 @@ def init_db() -> None:
         ensure_column(conn, "sources", "quality_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "chunks", "page_start", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "chunks", "page_end", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "chunks", "content_hash", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "sources", "superseded", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "sources", "superseded_by", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "wiki_pages", "aliases", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "wiki_pending_ops", "base_body", "TEXT")
+        ensure_column(conn, "wiki_pending_ops", "source", "TEXT NOT NULL DEFAULT 'agent'")
+        ensure_column(conn, "wiki_pending_ops", "payload", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "events", "project_id", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "insights", "project_id", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "insights", "note_id", "TEXT NOT NULL DEFAULT ''")
@@ -287,6 +356,7 @@ def init_db() -> None:
         seed_defaults(conn)
         localize_default_records(conn)
         backfill_pdf_evidence_chunks(conn)
+        retrieval.backfill_indexes(conn)
 
 
 def seed_defaults(conn: sqlite3.Connection) -> None:
@@ -914,62 +984,9 @@ def source_summary(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
-def fts_query(query: str) -> str:
-    tokens = re.findall(r"[\w\u4e00-\u9fff]+", query.lower())
-    return " OR ".join(tokens[:12]) if tokens else query
-
-
 def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[dict[str, Any]]:
-    q = query.strip()
-    if not q:
-        return []
-    results: list[dict[str, Any]] = []
-    try:
-        rows = conn.execute(
-            """
-            SELECT chunks.id AS chunk_id, chunks.source_id, chunks.chunk_index, chunks.title,
-                   chunks.page_start, chunks.page_end,
-                   snippet(chunks_fts, 1, '<mark>', '</mark>', '...', 18) AS snippet,
-                   chunks.content, sources.kind, sources.created_at, sources.parser_engine, sources.page_count,
-                   bm25(chunks_fts) AS rank
-            FROM chunks_fts
-            JOIN chunks ON chunks_fts.rowid = chunks.id
-            JOIN sources ON chunks.source_id = sources.id
-            WHERE chunks_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (fts_query(q), limit),
-        ).fetchall()
-        results = [row_dict(row) for row in rows]
-    except sqlite3.OperationalError:
-        results = []
-
-    if len(results) < limit:
-        like = f"%{q}%"
-        seen = {item["chunk_id"] for item in results}
-        rows = conn.execute(
-            """
-            SELECT chunks.id AS chunk_id, chunks.source_id, chunks.chunk_index, chunks.title,
-                   chunks.page_start, chunks.page_end,
-                   substr(chunks.content, 1, 260) AS snippet, chunks.content,
-                   sources.kind, sources.created_at, sources.parser_engine, sources.page_count, 10.0 AS rank
-            FROM chunks
-            JOIN sources ON chunks.source_id = sources.id
-            WHERE chunks.content LIKE ? OR chunks.title LIKE ?
-            ORDER BY chunks.id DESC
-            LIMIT ?
-            """,
-            (like, like, limit),
-        ).fetchall()
-        for row in rows:
-            item = row_dict(row)
-            if item["chunk_id"] not in seen:
-                results.append(item)
-                seen.add(item["chunk_id"])
-            if len(results) >= limit:
-                break
-    return results
+    """M1:三路召回(原文 BM25 / 中文双字 FTS / 哈希嵌入向量)+ RRF 融合,实现在 retrieval.py。"""
+    return retrieval.search_chunks(conn, query, limit)
 
 
 def extract_tasks(body: str) -> list[str]:
@@ -1391,7 +1408,7 @@ def local_answer(question: str, contexts: list[dict[str, Any]]) -> str:
     bullets = []
     for item in contexts[:4]:
         text = re.sub(r"\s+", " ", item["content"]).strip()
-        bullets.append(f"- [{item['title']} · {cite_location(item)}] {text[:320]}")
+        bullets.append(f"- [{item['title']} · {cite_location(item)}] {text[:480]}")
     return "我先基于本地检索结果给出可追溯摘要。当前没有配置模型 API key，所以没有进行生成式推理。\n\n" + "\n".join(bullets)
 
 
@@ -1559,6 +1576,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.list_connectors()
             if path.startswith("/api/conversations/"):
                 return self.get_conversation(path.rsplit("/", 1)[-1])
+            if path == "/api/wiki/pages":
+                return self.wiki_list_pages()
+            if path == "/api/wiki/pending":
+                return self.wiki_pending()
+            if path == "/api/wiki/lint":
+                return self.wiki_lint()
+            if path == "/api/wiki/settings":
+                return self.wiki_settings_get()
+            if path.startswith("/api/wiki/pages/"):
+                return self.wiki_get_page(urllib.parse.unquote(path.rsplit("/", 1)[-1]))
             return self.static_file(path)
         except Exception as exc:
             return internal_error(self, exc)
@@ -1600,6 +1627,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.toggle_connector(connector_id)
             if path == "/api/chat":
                 return self.chat(read_json(self))
+            if path == "/api/wiki/rebuild":
+                return self.wiki_rebuild(read_json(self))
+            if path == "/api/wiki/propose":
+                return self.wiki_propose(read_json(self))
+            if path == "/api/wiki/settings":
+                return self.wiki_settings_save(read_json(self))
+            if path == "/api/wiki/compose":
+                return self.wiki_compose(read_json(self))
+            if path.startswith("/api/wiki/pages/") and path.endswith("/merge"):
+                return self.wiki_merge(urllib.parse.unquote(path.split("/")[-2]), read_json(self))
+            if path.startswith("/api/wiki/ops/") and path.endswith("/apply"):
+                return self.wiki_resolve(path.split("/")[-2], True)
+            if path.startswith("/api/wiki/ops/") and path.endswith("/discard"):
+                return self.wiki_resolve(path.split("/")[-2], False)
+            if path.startswith("/api/wiki/pages/") and path.endswith("/rollback"):
+                return self.wiki_rollback(urllib.parse.unquote(path.split("/")[-2]), read_json(self))
             return json_response(self, {"detail": "没有找到对应接口或页面"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             return internal_error(self, exc)
@@ -1954,8 +1997,24 @@ class Handler(BaseHTTPRequestHandler):
                         "INSERT INTO chunks(source_id, chunk_index, title, content, page_start, page_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (source_id, index, source_title, chunk["content"], int(chunk["page_start"] or 0), int(chunk["page_end"] or 0), created),
                     )
+                retrieval.index_source(conn, source_id)
+                stale = conn.execute(
+                    "SELECT id, title FROM sources WHERE original_name = ? AND id != ? AND superseded = 0",
+                    (original_name, source_id),
+                ).fetchall()
+                for old in stale:
+                    conn.execute(
+                        "UPDATE sources SET superseded = 1, superseded_by = ?, updated_at = ? WHERE id = ?",
+                        (source_id, created, old["id"]),
+                    )
                 link_project_item(conn, project_id, "source", source_id)
                 add_event(conn, "source", f"已导入资料：{source_title}", f"{len(chunks)} 个内容块 · {quality.get('engine', 'unknown')}", project_id)
+                if stale:
+                    add_event(conn, "source", f"资料已更新：{source_title}", f"旧版本标记为被取代（{len(stale)} 份）", project_id)
+                try:
+                    wiki.update_pages_for_source(conn, source_id)
+                except Exception as exc:
+                    add_event(conn, "wiki", "wiki 页面更新失败", str(exc)[:200], project_id)
                 source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
                 json_response(self, {"duplicate": False, "source": source_summary(source), "chunks": len(chunks)})
         except Exception:
@@ -1978,6 +2037,10 @@ class Handler(BaseHTTPRequestHandler):
             if not row:
                 return json_response(self, {"detail": "没有找到这份资料"}, HTTPStatus.NOT_FOUND)
             Path(row["file_path"]).unlink(missing_ok=True)
+            conn.execute(
+                "DELETE FROM chunks_bigram WHERE chunk_id IN (SELECT id FROM chunks WHERE source_id = ?)",
+                (source_id,),
+            )
             conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             add_event(conn, "source", f"已删除资料：{row['title']}", "")
             json_response(self, {"status": "deleted"})
@@ -2213,7 +2276,16 @@ class Handler(BaseHTTPRequestHandler):
             if not conv:
                 conn.execute("INSERT INTO conversations(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", (conversation_id, safe_title(question), created, created))
             contexts = search_chunks(conn, question, 8)
-            answer = call_llm(get_secret_settings(conn), question, contexts)
+            tier, gate_reason = retrieval.confidence(conn, contexts, question)
+            if tier == "abstain":
+                contexts = []
+            settings = get_secret_settings(conn)
+            if settings["api_key"] and contexts:
+                answer = call_llm(settings, question, contexts)
+            else:
+                answer = local_answer(question, contexts)
+            if tier == "low" and contexts:
+                answer = "⚠️ 低置信:资料库中仅找到部分相关内容,请核对原文后再采信。\n\n" + answer
             citations = [
                 {
                     "source_id": item["source_id"],
@@ -2229,8 +2301,9 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("INSERT INTO messages(id, conversation_id, role, content, citations_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), conversation_id, "user", question, "[]", created))
             conn.execute("INSERT INTO messages(id, conversation_id, role, content, citations_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), conversation_id, "assistant", answer, json.dumps(citations, ensure_ascii=False), now_iso()))
             conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now_iso(), conversation_id))
-            add_event(conn, "chat", f"已提问：{question[:80]}", f"{len(citations)} 条引用")
-            json_response(self, {"conversation_id": conversation_id, "answer": answer, "citations": citations})
+            detail = f"{len(citations)} 条引用/{tier}" if citations else f"低置信拒答（{gate_reason}）"
+            add_event(conn, "chat", f"已提问：{question[:80]}", detail)
+            json_response(self, {"conversation_id": conversation_id, "answer": answer, "citations": citations, "confidence": tier, "gate_reason": gate_reason})
 
     def get_conversation(self, conversation_id: str) -> None:
         with connect() as conn:
@@ -2241,6 +2314,102 @@ class Handler(BaseHTTPRequestHandler):
             for message in messages:
                 message["citations"] = json.loads(message.pop("citations_json") or "[]")
             json_response(self, {"conversation": row_dict(conv), "messages": messages})
+
+    # ---------- M2:wiki 知识编译层 ----------
+
+    def wiki_list_pages(self) -> None:
+        with connect() as conn:
+            json_response(self, wiki.list_pages(conn))
+
+    def wiki_get_page(self, slug: str) -> None:
+        with connect() as conn:
+            data = wiki.get_page(conn, slug)
+        if data is None:
+            return json_response(self, {"detail": "没有找到这个页面"}, HTTPStatus.NOT_FOUND)
+        json_response(self, data)
+
+    def wiki_pending(self) -> None:
+        with connect() as conn:
+            json_response(self, wiki.pending_ops(conn))
+
+    def wiki_lint(self) -> None:
+        with connect() as conn:
+            json_response(self, wiki.lint(conn))
+
+    def wiki_rebuild(self, payload: dict[str, Any]) -> None:
+        dry_run = bool(payload.get("dry_run"))
+        force = bool(payload.get("force"))
+        with connect() as conn:
+            changes = wiki.rebuild_all(conn, dry_run=dry_run, force=force)
+        json_response(self, {"dry_run": dry_run, "force": force, "changes": changes})
+
+    def wiki_settings_get(self) -> None:
+        with connect() as conn:
+            json_response(self, {"auto_apply": wiki.get_config(conn, "wiki_auto_apply", "1") == "1"})
+
+    def wiki_settings_save(self, payload: dict[str, Any]) -> None:
+        with connect() as conn:
+            wiki.set_config(conn, "wiki_auto_apply", "1" if payload.get("auto_apply") else "0")
+            value = wiki.get_config(conn, "wiki_auto_apply", "1") == "1"
+        json_response(self, {"auto_apply": value})
+
+    def wiki_merge(self, slug: str, payload: dict[str, Any]) -> None:
+        into = str(payload.get("into") or "").strip()
+        if not into:
+            return json_response(self, {"detail": "into 不能为空"}, 400)
+        with connect() as conn:
+            try:
+                result = wiki.merge_pages(conn, slug, into)
+            except LookupError as exc:
+                return json_response(self, {"detail": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                return json_response(self, {"detail": str(exc)}, 400)
+        json_response(self, result)
+
+    def wiki_compose(self, payload: dict[str, Any]) -> None:
+        slugs = [str(s).strip() for s in (payload.get("slugs") or []) if str(s).strip()]
+        if not slugs:
+            return json_response(self, {"detail": "slugs 不能为空"}, 400)
+        template = str(payload.get("template") or "outline")
+        with connect() as conn:
+            try:
+                result = wiki.compose(conn, slugs, template, str(payload.get("title") or ""), bool(payload.get("save")))
+            except LookupError as exc:
+                return json_response(self, {"detail": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                return json_response(self, {"detail": str(exc)}, 400)
+        json_response(self, result)
+
+    def wiki_propose(self, payload: dict[str, Any]) -> None:
+        slug = str(payload.get("slug") or "").strip()
+        body = str(payload.get("body") or "")
+        if not slug or not body.strip():
+            return json_response(self, {"detail": "slug 和 body 不能为空"}, 400)
+        with connect() as conn:
+            result = wiki.propose(conn, slug, str(payload.get("title") or "").strip(), body, str(payload.get("note") or ""))
+        json_response(self, result)
+
+    def wiki_resolve(self, op_id: str, apply: bool) -> None:
+        with connect() as conn:
+            try:
+                result = wiki.resolve_op(conn, op_id, apply)
+            except LookupError as exc:
+                return json_response(self, {"detail": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                return json_response(self, {"detail": str(exc)}, 400)
+        json_response(self, result)
+
+    def wiki_rollback(self, slug: str, payload: dict[str, Any]) -> None:
+        try:
+            rev = int(payload.get("rev"))
+        except (TypeError, ValueError):
+            return json_response(self, {"detail": "rev 必须是整数"}, 400)
+        with connect() as conn:
+            try:
+                result = wiki.rollback(conn, slug, rev)
+            except LookupError as exc:
+                return json_response(self, {"detail": str(exc)}, HTTPStatus.NOT_FOUND)
+        json_response(self, result)
 
 
 def main() -> None:

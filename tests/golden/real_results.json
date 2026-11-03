@@ -1,0 +1,209 @@
+{
+  "run_at": "2026-11-03T14:26:12",
+  "files": [
+    "王安畅研发实习生.pdf",
+    "王安畅ai应用.pdf"
+  ],
+  "metrics": {
+    "fact_kw_hit": 1.0,
+    "no_answer_correct_abstain": 1.0
+  },
+  "wiki_pages": [
+    {
+      "slug": "agent",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "ast",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "claude",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "code",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "codex",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "coding",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "fgsm",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "github.com-0718lol-agent",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "hub",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "llm",
+      "kind": "entity",
+      "evidence": 2
+    },
+    {
+      "slug": "pytorch",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "react",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "reflexion",
+      "kind": "entity",
+      "evidence": 2
+    },
+    {
+      "slug": "slim",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "token",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "vue",
+      "kind": "entity",
+      "evidence": 1
+    },
+    {
+      "slug": "王安畅ai应用.pdf",
+      "kind": "topic",
+      "evidence": 3
+    },
+    {
+      "slug": "王安畅研发实习生.pdf",
+      "kind": "topic",
+      "evidence": 3
+    }
+  ],
+  "lint": {
+    "clean": true,
+    "summary": {}
+  },
+  "records": [
+    {
+      "id": "RR01",
+      "category": "fact_single",
+      "question": "候选人的专业技能里提到哪些编程语言?",
+      "top1": "王安畅ai应用.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅ai应用.pdf"
+    },
+    {
+      "id": "RR02",
+      "category": "fact_single",
+      "question": "候选人在云深科技实习期间做了什么?",
+      "top1": "王安畅研发实习生.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅研发实习生.pdf"
+    },
+    {
+      "id": "RR03",
+      "category": "fact_single",
+      "question": "政府部门风险核验 AI 助手包含哪些核心模块?",
+      "top1": "王安畅研发实习生.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅研发实习生.pdf"
+    },
+    {
+      "id": "RR04",
+      "category": "fact_single",
+      "question": "多 Agent 任务编排平台的上下文压缩率是多少?",
+      "top1": "王安畅ai应用.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅ai应用.pdf"
+    },
+    {
+      "id": "RR05",
+      "category": "fact_single",
+      "question": "skill-slim 解决什么问题?",
+      "top1": "王安畅研发实习生.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅研发实习生.pdf"
+    },
+    {
+      "id": "RR06",
+      "category": "fact_single",
+      "question": "星河智安平台实现了哪些对抗攻击算法?",
+      "top1": "王安畅研发实习生.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅研发实习生.pdf"
+    },
+    {
+      "id": "RR07",
+      "category": "fact_single",
+      "question": "候选人的教育背景是什么?",
+      "top1": "王安畅ai应用.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 2,
+      "top_citation": "王安畅ai应用.pdf"
+    },
+    {
+      "id": "RR08",
+      "category": "fact_single",
+      "question": "魔方教学工具带来了什么效果?",
+      "top1": "王安畅ai应用.pdf",
+      "abstained": false,
+      "kw_hit": true,
+      "n_citations": 6,
+      "top_citation": "王安畅ai应用.pdf"
+    },
+    {
+      "id": "RN01",
+      "category": "no_answer",
+      "question": "候选人的期望薪资是多少?",
+      "top1": "王安畅研发实习生.pdf",
+      "abstained": true,
+      "kw_hit": false,
+      "n_citations": 0,
+      "top_citation": ""
+    },
+    {
+      "id": "RN02",
+      "category": "no_answer",
+      "question": "候选人是否通过英语六级?",
+      "top1": "王安畅ai应用.pdf",
+      "abstained": true,
+      "kw_hit": false,
+      "n_citations": 0,
+      "top_citation": ""
+    }
+  ]
+}

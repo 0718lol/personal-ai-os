@@ -64,7 +64,8 @@ Personal AI OS 把这些放在一起：先做一个能每天用的本地工作�
 
 ```bash
 cd personal-ai-os
-python3 -m pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 npm install
 ```
 
@@ -83,7 +84,7 @@ http://localhost:8000
 测试时可以通过 `PERSONAL_AI_OS_DATA_DIR` 指定独立数据目录，避免污染默认工作区：
 
 ```bash
-PERSONAL_AI_OS_DATA_DIR=/tmp/personal-ai-os-test python3 -m unittest discover -s tests -q
+PERSONAL_AI_OS_DATA_DIR=/tmp/personal-ai-os-test .venv/bin/python -m unittest discover -s tests -q
 ```
 
 如果你在 ASteam 产品托管环境里运行，`app.toml` 已经配置好入口，平台会自动注入 `$PORT` 并托管服务。
@@ -124,7 +125,7 @@ API key 存在本地运行数据中，不写入源码。
 后续适合继续推进：
 
 - 更强的 OCR 和扫描 PDF 支持
-- 向量检索和混合排序
+- 真实语义嵌入模型和更大规模检索验证
 - 可编辑记忆
 - 更多连接器
 - 智能体权限和审批
@@ -153,3 +154,33 @@ personal-ai-os/
 - 空状态、错误状态、成功反馈必须清楚。
 - 本地优先，远程模型可替换。
 - 记忆和自动化必须可审查、可回退。
+
+
+## 知识页面工作流（2026-11-03）
+
+1. 在「资料库」上传资料，再进入「知识页面」浏览主题与实体。
+2. 阅读正文、双向链接和原文证据，点击证据可打开对应资料。
+3. 展开「修订正文」，填写修改后生成待审差异；在待审队列核对差异与完整正文，再批准或丢弃。
+4. 「正文历史与回滚」可恢复历史正文并保留新版本。回滚范围为正文，不含标题、别名和证据关系。
+5. 选择页面生成提纲、周报素材或学习材料，预览后提交待审，审核发布。生成采用原文抽取，不等于模型综合写作。
+6. 「自动发布资料整理结果」默认开启；关闭后，后续自动编译结果先进入审核队列。切换不会自动处理已有队列。
+
+人工维护的页面不会被自动整理覆盖。页面正文变化后，旧提案会被拦截，请丢弃并重新生成。早期没有保存正文基线的旧队列也需重新生成。
+
+检索使用原文 FTS、中文双字 FTS、字符哈希向量和 RRF；哈希向量不具备真实语义理解。问答区显示低置信与拒答状态，且只显示当前回答的引用。无答案合成评测中，4/10 拒答、6/10 低置信作答，不能把低置信提示当作答案正确。
+
+## 验证与数据边界
+
+```bash
+.venv/bin/python -m unittest discover -s tests -q
+node --check public/app.js
+.venv/bin/python tests/golden/run_baseline.py
+```
+
+黄金集覆盖 55 条查询与 5 条导入/更新操作；另有 10 条真实 PDF 评测，结果见 `tests/golden/`。关键词命中与引用覆盖不等于事实正确性，模型生成路径尚未验收。历史 M0/M1/M2/P1 报告保留用于追溯，最新验收结论见 `docs/CLOSEOUT.md`。
+
+浏览器验收脚本为 `tests/browser_smoke.cjs`，依赖额外安装的 Playwright 与 Chromium；启动使用全新 `PERSONAL_AI_OS_DATA_DIR` 的隔离服务后，以 `BROWSER_SMOKE_BASE=http://127.0.0.1:<端口> node tests/browser_smoke.cjs` 执行。可通过 `PLAYWRIGHT_MODULE` 与 `BROWSER_EXECUTABLE` 指定已有运行时。该脚本会上传测试资料并操作审核队列，仅用于隔离实例。
+
+启动脚本优先使用项目 `.venv`，启动时不联网安装依赖。`npm install` 在初始化时完成；未安装 Node 解析依赖时仍可使用 Python PDF 解析器。
+
+当前运行数据位于 `data/`，与测试隔离且被 Git 忽略。备份时请在停止服务后复制整个 `data/`，包括 SQLite、原始上传文件与 Wiki 镜像。恢复时先停止服务，再还原该目录。程序不会自动迁移或删除其他应用的知识库。

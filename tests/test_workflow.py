@@ -1,6 +1,8 @@
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -14,7 +16,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.port = 48123
         env = {**os.environ, "PORT": str(self.port), "PERSONAL_AI_OS_DATA_DIR": self.data_dir.name}
         self.process = subprocess.Popen(
-            ["python3", "server.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env
+            [sys.executable, str(Path(__file__).resolve().parent.parent / "server.py")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env
         )
         for _ in range(50):
             try:

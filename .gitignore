@@ -7,3 +7,7 @@ node_modules/
 .asteam-product.log
 .env
 .env.*
+
+.venv/
+*.pyc
+tests/golden/server_run.log

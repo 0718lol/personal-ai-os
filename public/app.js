@@ -25,6 +25,7 @@ const navItems = [
   ["projects", "项目"],
   ["playbooks", "项目模板"],
   ["sources", "资料库"],
+  ["wiki", "知识页面"],
   ["search", "搜索"],
   ["chat", "问答"],
   ["notes", "笔记"],
@@ -331,9 +332,9 @@ function setTitle(kicker, title) {
 function renderNav() {
   const groups = [
     [text.navGroups[0], navItems.slice(0, 3)],
-    [text.navGroups[1], navItems.slice(3, 11)],
-    [text.navGroups[2], navItems.slice(11, 14)],
-    [text.navGroups[3], navItems.slice(13)],
+    [text.navGroups[1], navItems.slice(3, 12)],
+    [text.navGroups[2], navItems.slice(12, 15)],
+    [text.navGroups[3], navItems.slice(15)],
   ];
   $("#nav").innerHTML = groups.map(([label, items]) => `
     <div class="nav-group">
@@ -617,7 +618,8 @@ function projectSelect(id, label = "所属项目") {
   `;
 }
 
-async function renderSources() {
+async function renderSources(selectedId = "") {
+  if (selectedId) state.selectedSource = await api(`/api/sources/${encodeURIComponent(selectedId)}`);
   setTitle("采集", "资料库");
   [state.sources, state.projects] = await Promise.all([api("/api/sources"), loadProjects()]);
   view.innerHTML = `
@@ -992,15 +994,17 @@ async function renderChat() {
   `;
   $("#chat-form").addEventListener("submit", askQuestion);
   bindInlineNav();
+  bindSourceButtons();
 }
 
 function renderMessage(message) {
-  return `<div class="message ${message.role === "user" ? "user" : ""}">${escapeHtml(message.content)}</div>`;
+  const label = message.role === "assistant" ? ({confident:"有检索证据 · 请核对引用", low:"低置信 · 证据可能不足", abstain:"证据不足 · 已拒答"})[message.confidence] : "";
+  return `<div class="message ${message.role === "user" ? "user" : ""}">${label ? `<div class="small">${escapeHtml(label)}</div>` : ""}${escapeHtml(message.content)}</div>`;
 }
 
 function citationList() {
-  const last = [...state.chat].reverse().find((message) => message.role === "assistant" && message.citations?.length);
-  if (!last) return empty("还没有引用", "导入资料后提问，回答会显示引用来源。");
+  const last = [...state.chat].reverse().find((message) => message.role === "assistant");
+  if (!last?.citations?.length) return empty("还没有引用", "导入资料后提问，回答会显示引用来源。");
   return `<div class="list">${last.citations.map((citation, index) => `
     <div class="item citation">
       <div class="item-row">
@@ -1032,7 +1036,7 @@ async function askQuestion(event) {
     });
     state.conversationId = result.conversation_id;
     state.chat.pop();
-    state.chat.push({ role: "assistant", content: result.answer, citations: result.citations });
+    state.chat.push({ role: "assistant", content: result.answer, citations: result.citations, confidence: result.confidence });
   } catch (error) {
     state.chat.pop();
     state.chat.push({ role: "assistant", content: userMessage(error), citations: [] });
@@ -1658,7 +1662,8 @@ async function navigate(viewName, payload = "") {
   try {
     if (viewName === "home") await renderHome();
     if (viewName === "playbooks") await renderPlaybooks();
-    if (viewName === "sources") await renderSources();
+    if (viewName === "sources") await renderSources(payload);
+    if (viewName === "wiki") await renderWiki(payload);
     if (viewName === "search") await renderSearch(payload);
     if (viewName === "chat") await renderChat();
     if (viewName === "notes") await renderNotes();
@@ -1696,3 +1701,82 @@ window.addEventListener("hashchange", () => {
 renderNav();
 const initialView = routeAliases[location.hash.slice(1)] || location.hash.slice(1);
 navigate(navItems.some(([key]) => key === initialView) ? initialView : "home");
+
+async function wikiPost(path, data = {}) {
+  return api(`/api/wiki/${path}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+}
+
+async function renderWiki(slug = "") {
+  setTitle("知识库", "知识页面");
+  const [pages, pending, lint, settings] = await Promise.all([
+    api("/api/wiki/pages"), api("/api/wiki/pending"), api("/api/wiki/lint"), api("/api/wiki/settings"),
+  ]);
+  const page = slug ? await api(`/api/wiki/pages/${encodeURIComponent(slug)}`) : null;
+  const e = escapeHtml;
+  const link = (s, title = s) => `<button type="button" data-wiki-page="${e(s)}">${e(title)}</button>`;
+  view.innerHTML = `
+    <div class="toolbar"><span>${pages.length} 个页面 · ${pending.length} 条待审 · ${lint.issues.length} 项检查提示</span><button id="wiki-refresh">刷新</button><button id="wiki-rebuild">整理资料</button></div>
+    <p class="small">上传资料后自动整理为知识页面。人工修订经审核发布后保留，历史正文可回滚。</p>
+    <label class="wiki-setting"><input id="wiki-auto" type="checkbox" ${settings.auto_apply ? "checked" : ""}> 自动发布资料整理结果（关闭后进入待审队列）</label>
+    <div class="wiki-layout">
+      ${panel("页面目录", `<label>筛选页面<input id="wiki-filter" placeholder="按标题查找"></label><div id="wiki-directory">${pages.map(p => `<div class="wiki-directory-item" data-title="${e(p.title.toLowerCase())}">${link(p.slug, p.title)}<span class="small">${e(({topic:"主题",entity:"实体",compose:"材料",manual:"手工"})[p.kind] || p.kind)} · ${p.evidence_count} 条证据</span></div>`).join("") || empty("还没有知识页面", "先去资料库上传文件，再回来查看。")}</div><button data-nav="sources">前往资料库</button>`)}
+      ${panel(page ? page.title : "阅读与修订", page ? `
+        <p class="small">${page.origin === "manual" ? "人工维护" : page.origin === "redirect" ? "重定向" : "自动整理"} · ${e(page.updated_at)}</p>
+        <pre class="wiki-body">${e(page.body).replace(/\[\[([^\]]+)\]\]/g, (_, target) => link(target, `[[${target}]]`))}</pre>
+        <details><summary>原文证据（${page.evidence.length}）</summary>${page.evidence.map(ev => `<article class="wiki-evidence"><button data-wiki-source="${e(ev.source_id)}">${e(ev.source_title)} · 第 ${ev.page_start}–${ev.page_end} 页</button>${ev.superseded ? '<strong class="error"> 已被新版取代</strong>' : ""}<p>${e(ev.quote)}</p></article>`).join("") || '<p class="small">此页面暂无原文证据。</p>'}</details>
+        <p>出链：${page.links_out.map(s => link(s)).join(" ") || "无"}</p><p>入链：${page.links_in.map(s => link(s)).join(" ") || "无"}</p>
+        <details><summary>修订正文（先进入审核队列）</summary><form id="wiki-edit"><label>标题<input name="title" value="${e(page.title)}" required></label><label>正文<textarea name="body" rows="12" required>${e(page.body)}</textarea></label><label>修改说明<input name="note" placeholder="本次修改原因"></label><button class="primary">生成待审差异</button></form></details>
+        <details><summary>正文历史与回滚</summary><p class="small">回滚会产生新版本；恢复范围为历史正文。</p>${page.revisions.map(r => `<div class="toolbar"><span>版本 ${r.rev} · ${e(r.note)} · ${e(r.created_at)}</span><button data-wiki-rev="${r.rev}">恢复此正文</button></div>`).join("")}</details>` : empty("选择一个页面", "点击左侧目录阅读正文、核对原文证据或提交修订。"))}
+    </div>
+    ${panel(`待审修改（${pending.length}）`, pending.map(op => `<details class="wiki-op"><summary>${e(op.proposed_title)} · ${e(({create:"新建",update:"更新",delete:"删除"})[op.op_type] || op.op_type)}</summary><p>${e(op.note)}</p><pre class="wiki-diff">${e(op.diff_text)}</pre><details><summary>完整拟发布正文</summary><pre class="wiki-body">${e(op.proposed_body)}</pre></details><div class="toolbar"><button class="primary" data-wiki-op="${e(op.id)}" data-action="apply">批准发布${op.op_type === "delete" ? "删除" : ""}</button><button data-wiki-op="${e(op.id)}" data-action="discard">丢弃</button></div></details>`).join("") || '<p class="small">没有待审修改。</p>')}
+    ${panel("生成带出处的材料", `<form id="wiki-compose"><label>材料标题<input name="title" required placeholder="例如：本周研究进展"></label><label>类型<select name="template"><option value="outline">提纲</option><option value="weekly">周报素材</option><option value="study">学习材料</option></select></label><fieldset><legend>选择知识页面</legend><div class="wiki-picks">${pages.filter(p => p.origin !== "redirect").map(p => `<label><input type="checkbox" name="slug" value="${e(p.slug)}"> ${e(p.title)}</label>`).join("") || "请先导入资料"}</div></fieldset><p class="small">按所选页面的原文证据抽取要点，请核对后使用。</p><button class="primary" ${pages.length ? "" : "disabled"}>预览材料</button></form><div id="wiki-compose-result"></div>`)}
+    ${panel("知识检查", lint.issues.map(i => `<p><strong>${e(i.severity === "error" ? "错误" : "提示")}</strong> ${link(i.slug)} · ${e(i.detail)}</p>`).join("") || '<p class="small">未发现断链、孤立页、陈旧证据或疑似矛盾。</p>')}
+  `;
+  bindInlineNav();
+  const action = (selector, fn) => view.querySelectorAll(selector).forEach(el => el.addEventListener("click", async () => {
+    el.disabled = true;
+    try { await fn(el); } catch (error) { showToast(userMessage(error), "error"); }
+    finally { el.disabled = false; }
+  }));
+  action("[data-wiki-page]", el => navigate("wiki", el.dataset.wikiPage));
+  action("[data-wiki-source]", el => navigate("sources", el.dataset.wikiSource));
+  action("#wiki-refresh", () => navigate("wiki", slug));
+  action("#wiki-rebuild", async () => { await wikiPost("rebuild", {dry_run:false}); await navigate("wiki"); showToast("资料已整理，待审结果见审核队列"); });
+  $("#wiki-auto").addEventListener("change", async event => {
+    const input = event.target; input.disabled = true;
+    try { await wikiPost("settings", {auto_apply:input.checked}); showToast("发布方式已保存"); }
+    catch (error) { input.checked = !input.checked; showToast(userMessage(error), "error"); }
+    finally { input.disabled = false; }
+  });
+  $("#wiki-filter").addEventListener("input", event => view.querySelectorAll(".wiki-directory-item").forEach(el => {el.hidden = !el.dataset.title.includes(event.target.value.toLowerCase());}));
+  action("[data-wiki-op]", async el => {
+    await wikiPost(`ops/${encodeURIComponent(el.dataset.wikiOp)}/${el.dataset.action}`);
+    await navigate("wiki"); showToast(el.dataset.action === "apply" ? "修改已发布" : "修改已丢弃");
+  });
+  action("[data-wiki-rev]", async el => {
+    if (!window.confirm(`将「${page.title}」正文恢复至版本 ${el.dataset.wikiRev}？当前正文会保留为历史版本。`)) return;
+    await wikiPost(`pages/${encodeURIComponent(slug)}/rollback`, {rev:Number(el.dataset.wikiRev)});
+    await navigate("wiki", slug); showToast("正文已恢复");
+  });
+  if (page) $("#wiki-edit").addEventListener("submit", async event => {
+    event.preventDefault(); const form = event.target; const button = form.querySelector("button"); button.disabled = true;
+    try { await wikiPost("propose", {slug, ...Object.fromEntries(new FormData(form))}); await navigate("wiki", slug); showToast("修订已进入待审队列"); }
+    catch (error) { showToast(userMessage(error), "error"); }
+    finally { button.disabled = false; }
+  });
+  $("#wiki-compose").addEventListener("submit", async event => {
+    event.preventDefault(); const form = event.target; const data = new FormData(form); const slugs = data.getAll("slug");
+    if (!slugs.length) { showToast("请至少选择一个页面", "error"); return; }
+    const button = form.querySelector("button"); button.disabled = true;
+    try {
+      const result = await wikiPost("compose", {slugs, title:data.get("title"), template:data.get("template"), save:false});
+      $("#wiki-compose-result").innerHTML = `<h3>材料预览</h3><pre class="wiki-body">${e(result.markdown)}</pre><button id="wiki-save-compose" class="primary">提交到待审队列</button>`;
+      action("#wiki-save-compose", async () => {
+        const title = String(data.get("title"));
+        await wikiPost("propose", {slug:`material-${Date.now()}`, title, body:result.markdown, note:"材料预览后提交"});
+        await navigate("wiki"); showToast("材料已进入待审队列");
+      });
+    } catch (error) { showToast(userMessage(error), "error"); }
+    finally { button.disabled = false; }
+  });
+}

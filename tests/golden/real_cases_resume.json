@@ -1,0 +1,16 @@
+{
+  "version": "M2-real-1",
+  "note": "真实语料用例(用户简历 PDF)。问题只涉及事实,不含联系方式等个人信息;预期关键词均为简历中的公开事实。",
+  "cases": [
+    {"id": "RR01", "category": "fact_single", "question": "候选人的专业技能里提到哪些编程语言?", "any_keywords": ["Python", "JavaScript"]},
+    {"id": "RR02", "category": "fact_single", "question": "候选人在云深科技实习期间做了什么?", "any_keywords": ["风险核验", "轻应用", "平台开发"]},
+    {"id": "RR03", "category": "fact_single", "question": "政府部门风险核验 AI 助手包含哪些核心模块?", "any_keywords": ["身份证校验", "七维流水"]},
+    {"id": "RR04", "category": "fact_single", "question": "多 Agent 任务编排平台的上下文压缩率是多少?", "any_keywords": ["96%"]},
+    {"id": "RR05", "category": "fact_single", "question": "skill-slim 解决什么问题?", "any_keywords": ["token"]},
+    {"id": "RR06", "category": "fact_single", "question": "星河智安平台实现了哪些对抗攻击算法?", "any_keywords": ["FGSM", "C&W"]},
+    {"id": "RR07", "category": "fact_single", "question": "候选人的教育背景是什么?", "any_keywords": ["浙江科技", "数据科学"]},
+    {"id": "RR08", "category": "fact_single", "question": "魔方教学工具带来了什么效果?", "any_keywords": ["70%"]},
+    {"id": "RN01", "category": "no_answer", "question": "候选人的期望薪资是多少?", "any_keywords": []},
+    {"id": "RN02", "category": "no_answer", "question": "候选人是否通过英语六级?", "any_keywords": []}
+  ]
+}
