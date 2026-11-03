@@ -1726,7 +1726,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             add_event(conn, "settings", "模型设置已更新", pairs["model"])
         with connect() as conn:
-            json_response(self, get_settings(conn))
+            response = get_settings(conn)
+        json_response(self, response)
 
     def list_projects(self) -> None:
         with connect() as conn:
@@ -1746,7 +1747,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             add_event(conn, "project", f"已创建项目：{name[:80]}", str(payload.get("goal") or payload.get("description") or "").strip(), project_id)
             row = conn.execute("SELECT * FROM collections WHERE id = ?", (project_id,)).fetchone()
-            json_response(self, public_project(conn, row))
+            response = public_project(conn, row)
+        json_response(self, response)
 
     def get_project(self, project_id: str) -> None:
         with connect() as conn:
@@ -1885,7 +1887,8 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             add_event(conn, "playbook", f"已应用项目模板：{data['name']}", data["audience"], collection_id)
-            json_response(self, {"playbook": data, "collection_id": collection_id, "task_ids": task_ids, "memory_ids": memory_ids, "run_id": run_id})
+            response = {"playbook": data, "collection_id": collection_id, "task_ids": task_ids, "memory_ids": memory_ids, "run_id": run_id}
+        json_response(self, response)
 
     def parse_multipart(self) -> dict:
         """Parse multipart/form-data into {field: value}, files as dicts
@@ -2044,7 +2047,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             add_event(conn, "source", f"已删除资料：{row['title']}", "")
-            json_response(self, {"status": "deleted"})
+            response = {"status": "deleted"}
+        json_response(self, response)
 
     def create_note(self, payload: dict[str, Any]) -> None:
         body = str(payload.get("body") or "").strip()
@@ -2082,7 +2086,8 @@ class Handler(BaseHTTPRequestHandler):
             insights = save_insights(conn, project_id, note_id, extract_insights(body))
             add_event(conn, "note", f"已保存笔记：{title}", f"{len(created_tasks)} 个任务 · {len(memories)} 条待审记忆 · {len(insights)} 条洞察", project_id)
             note = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
-            json_response(self, {"note": row_dict(note), "tasks": created_tasks, "memories": memories, "insights": insights})
+            response = {"note": row_dict(note), "tasks": created_tasks, "memories": memories, "insights": insights}
+        json_response(self, response)
 
     def organize_note(self, note_id: str, payload: dict[str, Any]) -> None:
         project_id = str(payload.get("project_id") or "").strip()
@@ -2099,7 +2104,8 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("DELETE FROM insights WHERE note_id = ? AND (? = '' OR project_id = ?)", (note_id, project_id, project_id))
             insights = save_insights(conn, project_id, note_id, extract_insights(note["body"]))
             add_event(conn, "insight", f"已整理笔记：{display_note_title(note)}", f"{len(insights)} 条结构化洞察", project_id)
-            json_response(self, {"note": row_dict(note), "insights": insights})
+            response = {"note": row_dict(note), "insights": insights}
+        json_response(self, response)
 
     def list_insights(self, query: dict[str, list[str]]) -> None:
         project_id = query.get("project_id", [""])[0]
@@ -2154,7 +2160,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             add_event(conn, "deliverable", f"已生成交付物：{title}", template, project_id)
             row = conn.execute("SELECT * FROM deliverables WHERE id = ?", (deliverable_id,)).fetchone()
-            json_response(self, row_dict(row))
+            response = row_dict(row)
+        json_response(self, response)
 
     def toggle_task(self, task_id: str) -> None:
         with connect() as conn:
@@ -2163,7 +2170,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"detail": "没有找到这个任务"}, HTTPStatus.NOT_FOUND)
             status = "done" if row["status"] != "done" else "open"
             conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", (status, now_iso(), task_id))
-            json_response(self, row_dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()))
+            response = row_dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
+        json_response(self, response)
 
     def list_memories(self, query: dict[str, list[str]]) -> None:
         status = query.get("status", [""])[0]
@@ -2207,7 +2215,8 @@ class Handler(BaseHTTPRequestHandler):
             link_project_item(conn, project_id, "memory", memory_id)
             add_event(conn, "memory", f"已保存记忆：{title}", status, project_id)
             row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
-            json_response(self, row_dict(row))
+            response = row_dict(row)
+        json_response(self, response)
 
     def update_memory_status(self, memory_id: str, payload: dict[str, Any]) -> None:
         status = str(payload.get("status") or "").strip()
@@ -2219,7 +2228,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"detail": "没有找到这条记忆"}, HTTPStatus.NOT_FOUND)
             conn.execute("UPDATE memories SET status = ?, updated_at = ? WHERE id = ?", (status, now_iso(), memory_id))
             add_event(conn, "memory", f"记忆已更新为 {status}: {row['title']}", "")
-            json_response(self, row_dict(conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()))
+            response = row_dict(conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone())
+        json_response(self, response)
 
     def list_agents(self) -> None:
         with connect() as conn:
@@ -2244,7 +2254,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             add_event(conn, "agent", f"已运行智能体：{agent['name']}", user_input[:120])
             row = conn.execute("SELECT agent_runs.*, agents.name AS agent_name FROM agent_runs JOIN agents ON agents.id = agent_runs.agent_id WHERE agent_runs.id = ?", (run_id,)).fetchone()
-            json_response(self, public_run(row))
+            response = public_run(row)
+        json_response(self, response)
 
     def list_runs(self) -> None:
         with connect() as conn:
@@ -2264,7 +2275,8 @@ class Handler(BaseHTTPRequestHandler):
             status = "enabled" if row["status"] != "enabled" else "planned"
             conn.execute("UPDATE connectors SET status = ?, updated_at = ? WHERE id = ?", (status, now_iso(), connector_id))
             add_event(conn, "connector", f"{row['name']} 已切换为 {status}", "")
-            json_response(self, public_connector(conn.execute("SELECT * FROM connectors WHERE id = ?", (connector_id,)).fetchone()))
+            response = public_connector(conn.execute("SELECT * FROM connectors WHERE id = ?", (connector_id,)).fetchone())
+        json_response(self, response)
 
     def chat(self, payload: dict[str, Any]) -> None:
         question = str(payload.get("question") or "").strip()
@@ -2304,7 +2316,8 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now_iso(), conversation_id))
             detail = f"{len(citations)} 条引用/{tier}" if citations else f"低置信拒答（{gate_reason}）"
             add_event(conn, "chat", f"已提问：{question[:80]}", detail)
-            json_response(self, {"conversation_id": conversation_id, "answer": answer, "citations": citations, "confidence": tier, "gate_reason": gate_reason})
+            response = {"conversation_id": conversation_id, "answer": answer, "citations": citations, "confidence": tier, "gate_reason": gate_reason}
+        json_response(self, response)
 
     def get_conversation(self, conversation_id: str) -> None:
         with connect() as conn:

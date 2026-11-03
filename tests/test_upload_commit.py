@@ -1,4 +1,4 @@
-"""An upload success response must not escape before its DB transaction commits."""
+"""Write success responses must not escape before their DB transactions commit."""
 import os
 import subprocess
 import sys
@@ -62,8 +62,30 @@ assert first["source"]["id"] == second["source"]["id"]
 '''
 
 
+# Exercise the same response/commit boundary for the other CI failures.
+CHECK += r'''
+responses = []
+def capture_write(handler, payload, *args):
+    assert not pending_transaction, "write response sent while transaction is still open"
+    responses.append(payload)
+handler = server.Handler.__new__(server.Handler)
+with patch.object(server, "connect", tracked_connect), patch.object(server, "json_response", capture_write):
+    handler.create_project({"name": "提交顺序验收"})
+    project = responses[-1]
+    handler.create_note({"project_id": project["id"], "body": "TODO: 验证持久化"})
+    note = responses[-1]["note"]
+    with sqlite3.connect(server.DB_PATH) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM notes WHERE id=?", (note["id"],)).fetchone()[0] == 1
+        assert reader.execute("SELECT COUNT(*) FROM tasks WHERE source_id=?", (note["id"],)).fetchone()[0] == 1
+    handler.delete_source(first["source"]["id"])
+    with sqlite3.connect(server.DB_PATH) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM chunks_bigram").fetchone()[0] == 0
+        assert reader.execute("SELECT COUNT(*) FROM sources").fetchone()[0] == 0
+'''
+
+
 class UploadCommitTests(unittest.TestCase):
-    def test_new_and_duplicate_upload_respond_only_after_commit(self):
+    def test_upload_note_and_delete_respond_only_after_commit(self):
         with tempfile.TemporaryDirectory() as data_dir:
             result = subprocess.run(
                 [sys.executable, "-c", CHECK], cwd=ROOT,
