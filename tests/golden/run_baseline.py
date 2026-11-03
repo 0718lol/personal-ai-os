@@ -287,7 +287,7 @@ def write_report(summary: dict, records: list[dict], ops: list[dict], title_map:
     lines += ["", f"## fact_cross 引用未覆盖全部文档({len(cross_fails)} 条)", ""]
     for r in cross_fails:
         lines.append(f"- {r['id']} `{r['question']}`")
-    out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out_md.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     out_json.write_text(json.dumps({
         "summary": summary, "records": records, "ops": ops, "title_map": title_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
