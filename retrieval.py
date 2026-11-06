@@ -117,7 +117,6 @@ def index_source(conn: sqlite3.Connection, source_id: str) -> None:
     rows = conn.execute(
         "SELECT id, content, content_hash FROM chunks WHERE source_id = ?", (source_id,)
     ).fetchall()
-    qvec = None
     for row in rows:
         chunk_id, content, chash = row["id"], row["content"], row["content_hash"]
         if not chash:
@@ -128,11 +127,9 @@ def index_source(conn: sqlite3.Connection, source_id: str) -> None:
         conn.execute(
             "INSERT INTO chunks_bigram(chunk_id, body) VALUES (?, ?)", (chunk_id, body)
         )
-        if qvec is None:
-            qvec = embed(content)
         conn.execute(
             "INSERT OR REPLACE INTO chunk_vectors(chunk_id, dim, vector) VALUES (?, ?, ?)",
-            (chunk_id, EMBED_DIM, pack_vector(qvec)),
+            (chunk_id, EMBED_DIM, pack_vector(embed(content))),
         )
 
 
@@ -161,11 +158,17 @@ def backfill_indexes(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------- search
 
 def _fts_query(query: str) -> str:
-    """原文 FTS 腿的 MATCH 表达式:拉丁词 + 多字中文段(单字如"的"太泛,剔除)。"""
+    """原文 FTS 腿的 MATCH 表达式:拉丁词 + 多字中文段(单字如"的"太泛,剔除)。
+
+    词元一律包双引号成短语:gpt-4、node.js 这类带符号的词不加引号会触发
+    FTS5 语法错误,search_chunks 会把整条原文腿静默吞掉。
+    """
     lats = [t for t in dict.fromkeys(_LAT.findall(query.lower())) if len(t) >= 2]
     runs = [r for r in dict.fromkeys(_CJK.findall(query)) if len(r) >= 2]
     tokens = (lats + runs)[:12]
-    return " OR ".join(tokens) if tokens else (query.strip() or query)
+    if not tokens:
+        return query.strip() or query
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
 def _load_rows(conn: sqlite3.Connection, ids: list[int]) -> dict[int, dict[str, Any]]:

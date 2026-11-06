@@ -161,6 +161,37 @@ class RetrievalM1Tests(unittest.TestCase):
         self.assertFalse(first.get("duplicate"))
         self.assertTrue(second.get("duplicate"))
 
+    def test_each_chunk_gets_its_own_embedding(self):
+        # 回归 issue#1:index_source 曾把首 chunk 的向量复用到整份资料
+        sys.path.insert(0, str(ROOT))
+        import retrieval
+        paragraphs = [
+            f"第{i}节:项目{i}的年度预算上限是{i * 111}万元,由第{i}团队负责,含差旅与设备采购,"
+            f"超支需提前一周报备,审批人为分管副总,季度末统一复审并公示结余情况。"
+            for i in range(1, 31)
+        ]
+        self.upload("预算汇编.md", "# 部门预算汇编\n\n" + "\n\n".join(paragraphs))
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT c.content, v.vector FROM chunks c "
+                "JOIN chunk_vectors v ON v.chunk_id = c.id "
+                "WHERE c.title = ? ORDER BY c.chunk_index",
+                ("预算汇编.md",),
+            ).fetchall()
+        self.assertGreater(len(rows), 1, "测试文档应切成多个 chunk")
+        self.assertEqual(len({blob for _, blob in rows}), len(rows), "不同 chunk 不应共享同一向量")
+        for content, blob in rows:
+            sim = retrieval.cosine(retrieval.unpack_vector(blob), retrieval.embed(content))
+            self.assertGreaterEqual(sim, 0.99, "每个 chunk 的向量应来自其自身内容")
+
+    def test_fts_leg_survives_punctuated_latin_tokens(self):
+        # 回归 issue#2:gpt-4 / node.js 不加引号会让原文 FTS 腿静默失效
+        doc = "# 平台兼容性说明\n\n接入层同时兼容 gpt-4 接口与 node.js SDK,内网部署无需出网带宽。\n"
+        self.upload("兼容性说明.md", doc)
+        hits = self.search("gpt-4 怎么配合 node.js?")
+        self.assertTrue(hits, "带符号拉丁词应能召回结果")
+        self.assertIn("fts", hits[0]["confidence_signals"]["legs"], "原文 FTS 腿不应静默失效")
+
     def test_delete_source_cleans_indexes(self):
         uploaded = self.upload("员工手册.md", HANDBOOK)
         source_id = uploaded["source"]["id"]

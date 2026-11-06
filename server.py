@@ -370,6 +370,11 @@ def init_db() -> None:
         seed_defaults(conn)
         localize_default_records(conn)
         backfill_pdf_evidence_chunks(conn)
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            # v1:修复 index_source 把首 chunk 向量复用到整份资料的缺陷(issue#1)。
+            # 旧向量无法从数据上区分对错,一次性清空,由下面的 backfill_indexes 全量重建。
+            conn.execute("DELETE FROM chunk_vectors")
+            conn.execute("PRAGMA user_version = 1")
         retrieval.backfill_indexes(conn)
 
 
