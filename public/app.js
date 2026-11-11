@@ -13,6 +13,8 @@ const state = {
   selectedSource: null,
   chat: [],
   conversationId: null,
+  knowledgeProject: "",
+  chatBusy: false,
   noteQuery: "",
   notePage: 1,
   toastTimer: null,
@@ -775,7 +777,10 @@ function projectDetail(detail) {
         <button data-nav="sources">添加资料</button>
         <button data-nav="notes">记录进展</button>
         <button data-nav="agents">运行推进员</button>
+        <button data-export-task="${project.id}">导出执行任务</button>
+        <label>导入执行回执<input type="file" accept=".json" data-import-receipt="${project.id}" /></label>
       </div>
+      ${(detail.receipts || []).map(receipt => `<details class="item"><summary>待审执行回执</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${escapeHtml(JSON.stringify(receipt.payload, null, 2))}</pre><button data-receipt="${receipt.id}" data-receipt-action="approve" data-project="${project.id}">批准存入项目笔记</button><button data-receipt="${receipt.id}" data-receipt-action="discard" data-project="${project.id}">丢弃</button></details>`).join('')}
       <div class="project-sections">
         ${sectionBlock("下一步任务", detail.tasks.length ? taskList(detail.tasks) : empty("没有任务", "在项目笔记里写 TODO: 可以自动创建任务。"))}
         ${sectionBlock("结构化洞察", detail.insights?.length ? insightList(detail.insights) : empty("没有洞察", "整理项目笔记后，会提取决策、问题、风险和行动。"))}
@@ -937,6 +942,52 @@ async function uploadSource(event) {
 }
 
 function bindSourceButtons() {
+  document.querySelectorAll('[data-export-task]').forEach(button => {
+    button.onclick = async () => {
+      try {
+        const payload = await api('/api/projects/' + button.dataset.exportTask + '/handoff', { method: 'POST' });
+        const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+        const link = document.createElement('a'); link.href = url; link.download = 'project-task-' + payload.handoff_id + '.json'; link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) { showToast(userMessage(error), 'error'); }
+    };
+  });
+  document.querySelectorAll('[data-import-receipt]').forEach(input => {
+    input.onchange = async () => {
+      try {
+        const file = input.files[0];
+        if (!file || file.size > 1000000) throw new Error('请选择小于 1 MB 的回执 JSON');
+        await api('/api/projects/' + input.dataset.importReceipt + '/receipts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(JSON.parse(await file.text())) });
+        await renderProjects(input.dataset.importReceipt);
+        showToast('回执已进入审核队列');
+      } catch (error) { showToast(userMessage(error), 'error'); }
+    };
+  });
+  document.querySelectorAll('[data-receipt]').forEach(button => {
+    button.onclick = async () => {
+      try {
+        await api('/api/receipts/' + button.dataset.receipt + '/' + button.dataset.receiptAction, { method: 'POST' });
+        await renderProjects(button.dataset.project);
+      } catch (error) { showToast(userMessage(error), 'error'); }
+    };
+  });
+  document.querySelectorAll('[data-knowledge]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        const item = await api('/api/knowledge/' + button.dataset.knowledge);
+        let dialog = document.querySelector('#knowledge-detail');
+        if (!dialog) {
+          dialog = document.createElement('dialog');
+          dialog.id = 'knowledge-detail';
+          dialog.style.cssText = 'max-width:720px;width:90%;max-height:80vh;overflow:auto';
+          document.body.append(dialog);
+        }
+        dialog.innerHTML = '<h2>' + escapeHtml(item.title) + '</h2><pre style="white-space:pre-wrap">' + escapeHtml(item.body || item.title) + '</pre><button type="button">关闭</button>';
+        dialog.querySelector('button').onclick = () => dialog.close();
+        dialog.showModal();
+      } catch (error) { showToast(userMessage(error), 'error'); }
+    });
+  });
   document.querySelectorAll("[data-source]").forEach((button) => {
     button.addEventListener("click", async () => {
       state.selectedSource = await api(`/api/sources/${button.dataset.source}`);
@@ -956,11 +1007,33 @@ function bindSourceButtons() {
   }
 }
 
+function knowledgeButton(item) {
+  const type = item.item_type || 'source';
+  return type === 'source'
+    ? '<button class="ghost" data-source="' + escapeHtml(item.source_id) + '">打开</button>'
+    : '<button class="ghost" data-knowledge="' + escapeHtml(type + '/' + item.item_id) + '">打开</button>';
+}
+
+function knowledgeScope() {
+  return '<label for="knowledge-project">检索范围</label><select id="knowledge-project"><option value="">全部项目</option>' + state.projects.map(p => '<option value="' + escapeHtml(p.id) + '"' + (state.knowledgeProject === p.id ? ' selected' : '') + '>' + escapeHtml(p.name) + '</option>').join('') + '</select>';
+}
+
+function bindKnowledgeScope(render) {
+  $('#knowledge-project').addEventListener('change', async (event) => {
+    state.knowledgeProject = event.target.value;
+    state.conversationId = null;
+    state.chat = [];
+    await render();
+  });
+}
+
 async function renderSearch(query = "") {
   setTitle("查找", "搜索");
-  const results = query ? await api(`/api/search?q=${encodeURIComponent(query)}&limit=18`) : { results: [] };
+  state.projects = await api('/api/projects');
+  const results = query ? await api(`/api/search?q=${encodeURIComponent(query)}&limit=18&project_id=${encodeURIComponent(state.knowledgeProject)}`) : { results: [] };
   view.innerHTML = `
     ${panel("统一搜索", `
+      ${knowledgeScope()}
       <form id="search-form" class="toolbar">
         <input id="search-input" type="search" value="${escapeHtml(query)}" placeholder="搜索关键词、主题、人物或决策" />
         <button class="primary" type="submit">搜索</button>
@@ -976,15 +1049,16 @@ async function renderSearch(query = "") {
                   <div class="item-title">${escapeHtml(result.title)}</div>
                   <div class="meta">${tStatus(result.kind)} · ${locationLabel(result)} · 内容块 ${result.chunk_index}</div>
                 </div>
-                <button class="ghost" data-source="${result.source_id}">打开</button>
+                ${knowledgeButton(result)}
               </div>
-              <p class="snippet">${result.snippet}</p>
+              <p class="snippet">${escapeHtml(result.snippet.replace(/<\/?mark>/g, ''))}</p>
             </article>
           `).join("")}
         </div>
       ` : empty(query ? "没有匹配结果" : "搜索已就绪", query ? "可以换一个更宽泛的问题，或导入更多资料。" : "当前使用 SQLite FTS，并在必要时回退到普通文本匹配。"))}
     </div>
   `;
+  bindKnowledgeScope(() => renderSearch(query));
   $("#search-form").addEventListener("submit", (event) => {
     event.preventDefault();
     navigate("search", $("#search-input").value.trim());
@@ -995,9 +1069,11 @@ async function renderSearch(query = "") {
 async function renderChat() {
   setTitle("提问", "问答");
   const settings = await api("/api/settings");
+  state.projects = await api('/api/projects');
   view.innerHTML = `
     <div class="grid two">
       ${panel("对话", `
+        ${knowledgeScope()}
         ${modelStatusNotice(settings, true)}
         <div class="chat-log" id="chat-log">
           ${state.chat.length ? state.chat.map(renderMessage).join("") : empty("向你的资料库提问", "回答会引用已导入资料，并标出证据来源。")}
@@ -1005,13 +1081,15 @@ async function renderChat() {
         <form id="chat-form" class="form-stack" style="margin-top:14px">
           <textarea id="chat-question" placeholder="询问已导入资料、决策、任务或笔记"></textarea>
           <div class="split-actions">
-            <button type="submit" class="primary">提问</button>
+            <button type="submit" class="primary" ${state.chatBusy ? 'disabled' : ''}>${state.chatBusy ? '正在回答…' : '提问'}</button>
           </div>
         </form>
       `)}
       ${panel("引用来源", citationList())}
     </div>
   `;
+  bindKnowledgeScope(renderChat);
+  $('#knowledge-project').disabled = state.chatBusy;
   $("#chat-form").addEventListener("submit", askQuestion);
   bindInlineNav();
   bindSourceButtons();
@@ -1033,7 +1111,7 @@ function citationList() {
           <div class="meta">${escapeHtml(citation.location || locationLabel(citation))}</div>
           <div class="small">${escapeHtml(citation.snippet)}</div>
         </div>
-        <button class="ghost" data-source="${citation.source_id}">打开</button>
+        ${knowledgeButton(citation)}
       </div>
     </div>
   `).join("")}</div>`;
@@ -1043,7 +1121,8 @@ async function askQuestion(event) {
   event.preventDefault();
   const input = $("#chat-question");
   const question = input.value.trim();
-  if (!question) return;
+  if (!question || state.chatBusy) return;
+  state.chatBusy = true;
   input.value = "";
   state.chat.push({ role: "user", content: question });
   state.chat.push({ role: "assistant", content: "正在检索本地上下文...", citations: [] });
@@ -1052,7 +1131,7 @@ async function askQuestion(event) {
     const result = await api("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, conversation_id: state.conversationId }),
+      body: JSON.stringify({ question, conversation_id: state.conversationId, project_id: state.knowledgeProject }),
     });
     state.conversationId = result.conversation_id;
     state.chat.pop();
@@ -1061,6 +1140,7 @@ async function askQuestion(event) {
     state.chat.pop();
     state.chat.push({ role: "assistant", content: userMessage(error), citations: [] });
   }
+  state.chatBusy = false;
   await renderChat();
   bindSourceButtons();
 }

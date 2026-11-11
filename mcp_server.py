@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import retrieval
+import knowledge
 import wiki
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +31,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "检索问题, 支持中英文"},
+                "project_id": {"type": "string", "description": "限定项目；留空搜索全部项目"},
                 "limit": {"type": "integer", "description": "返回片段数, 默认 8", "default": 8},
             },
             "required": ["query"],
@@ -78,7 +80,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             if not query:
                 raise ValueError("query 不能为空")
             limit = max(1, min(int(args.get("limit", 8) or 8), 20))
-            results = retrieval.search_chunks(conn, query, limit=limit)
+            results = knowledge.search(conn, query, limit=limit, project_id=str(args.get("project_id") or ""))
             level, reason = retrieval.confidence(conn, results, query)
             return _text_result({"confidence": level, "reason": reason, "results": results})
         if name == "wiki_read_page":

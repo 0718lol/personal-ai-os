@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 import retrieval
+import knowledge
+import handoff
 import wiki
 
 try:
@@ -367,6 +369,15 @@ def init_db() -> None:
         ensure_column(conn, "insights", "project_id", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "insights", "note_id", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "deliverables", "project_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "conversations", "project_id", "TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE TABLE IF NOT EXISTS source_heads (project_id TEXT NOT NULL, original_name TEXT NOT NULL, source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE, PRIMARY KEY(project_id, original_name))")
+        # Backfill once: source heads are independent for each existing project.
+        if not conn.execute("SELECT 1 FROM settings WHERE key='source_heads_initialized'").fetchone():
+            conn.execute("INSERT OR IGNORE INTO source_heads SELECT ci.collection_id,s.original_name,s.id FROM sources s JOIN collection_items ci ON ci.item_id=s.id AND ci.item_type='source' WHERE s.superseded=0 ORDER BY s.created_at DESC")
+            conn.execute("INSERT OR IGNORE INTO source_heads SELECT '',s.original_name,s.id FROM sources s WHERE s.superseded=0 AND NOT EXISTS (SELECT 1 FROM collection_items ci WHERE ci.item_id=s.id AND ci.item_type='source') ORDER BY s.created_at DESC")
+            conn.execute("INSERT INTO settings(key,value) VALUES ('source_heads_initialized','1')")
+        conn.execute("CREATE TABLE IF NOT EXISTS handoff_exports (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,evidence_hash TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS handoff_returns (id TEXT PRIMARY KEY,project_id TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL)")
         seed_defaults(conn)
         localize_default_records(conn)
         backfill_pdf_evidence_chunks(conn)
@@ -1003,9 +1014,9 @@ def source_summary(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
-def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[dict[str, Any]]:
+def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8, project_id: str = "") -> list[dict[str, Any]]:
     """M1:三路召回(原文 BM25 / 中文双字 FTS / 哈希嵌入向量)+ RRF 融合,实现在 retrieval.py。"""
-    return retrieval.search_chunks(conn, query, limit)
+    return knowledge.search(conn, query, limit, project_id)
 
 
 def extract_tasks(body: str) -> list[str]:
@@ -1431,7 +1442,7 @@ def local_answer(question: str, contexts: list[dict[str, Any]]) -> str:
     return "我先基于本地检索结果给出可追溯摘要。当前没有配置模型 API key，所以没有进行生成式推理。\n\n" + "\n".join(bullets)
 
 
-def call_llm(settings: dict[str, str], question: str, contexts: list[dict[str, Any]]) -> str:
+def call_llm(settings: dict[str, str], question: str, contexts: list[dict[str, Any]], history: list[dict[str, str]] | None = None) -> str:
     if not settings["api_key"]:
         return local_answer(question, contexts)
     evidence = "\n\n".join(
@@ -1447,6 +1458,7 @@ def call_llm(settings: dict[str, str], question: str, contexts: list[dict[str, A
         "model": settings["model"],
         "messages": [
             {"role": "system", "content": "You produce concise, cited answers for a local-first personal AI workspace."},
+            *(history or []),
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
@@ -1546,7 +1558,16 @@ class Handler(BaseHTTPRequestHandler):
                 q = query.get("q", [""])[0]
                 limit = int(query.get("limit", ["12"])[0])
                 with connect() as conn:
-                    return json_response(self, {"query": q, "results": search_chunks(conn, q, min(max(limit, 1), 30))})
+                    return json_response(self, {"query": q, "results": search_chunks(conn, q, min(max(limit, 1), 30), query.get("project_id", [""])[0])})
+            if path.startswith("/api/knowledge/"):
+                kind, item_id = path.split("/")[-2:]
+                table = {"note": "notes", "memory": "memories", "task": "tasks"}.get(kind)
+                if not table:
+                    return json_response(self, {"detail": "来源类型无效"}, 400)
+                with connect() as conn:
+                    row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
+                    data = row_dict(row) if row else None
+                return json_response(self, data or {"detail": "没有找到这个来源"}, 200 if data else 404)
             if path == "/api/notes":
                 project_id = query.get("project_id", [""])[0]
                 with connect() as conn:
@@ -1623,6 +1644,35 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/playbooks/") and path.endswith("/apply"):
                 playbook_id = path.split("/")[-2]
                 return self.apply_playbook(playbook_id)
+            if path.startswith("/api/projects/") and path.endswith("/handoff"):
+                with connect() as conn:
+                    payload = handoff.export_task(conn, path.split("/")[-2])
+                return json_response(self, payload)
+            if path.startswith("/api/projects/") and path.endswith("/receipts"):
+                project_id = path.split("/")[-2]
+                payload = read_json(self)
+                try:
+                    with connect() as conn:
+                        result = handoff.stage_receipt(conn, project_id, payload, now_iso())
+                except ValueError as exc:
+                    return json_response(self,{"detail":str(exc)},400)
+                return json_response(self,result)
+            if path.startswith("/api/receipts/") and path.endswith(("/approve","/discard")):
+                receipt_id = path.split("/")[-2]
+                with connect() as conn:
+                    row = conn.execute("SELECT * FROM handoff_returns WHERE id=?",(receipt_id,)).fetchone()
+                    if not row or row['status'] != 'pending':
+                        return json_response(self,{"detail":"没有找到待审回执"},409)
+                    approve = path.endswith("/approve")
+                    if approve:
+                        body = handoff.receipt_markdown(json.loads(row['payload']))
+                        note_id = str(uuid.uuid4())
+                        created = now_iso()
+                        conn.execute("INSERT INTO notes(id,title,body,title_source,created_at,updated_at) VALUES (?,?,?,'explicit',?,?)",(note_id,'AgentHub 执行回执',body,created,created))
+                        link_project_item(conn,row['project_id'],'note',note_id)
+                    conn.execute("UPDATE handoff_returns SET status=? WHERE id=?",('approved' if approve else 'discarded',receipt_id))
+                    add_event(conn,'handoff','执行回执已批准' if approve else '执行回执已丢弃','',row['project_id'])
+                return json_response(self,{'status':'approved' if approve else 'discarded'})
             if path == "/api/sources/upload":
                 return self.upload_source()
             if path == "/api/notes":
@@ -1843,6 +1893,7 @@ class Handler(BaseHTTPRequestHandler):
                 "events": [row_dict(row) for row in events],
                 "insights": [row_dict(row) for row in insights],
                 "deliverables": [row_dict(row) for row in deliverables],
+                "receipts": [{"id":r['id'],"payload":json.loads(r['payload']),"status":r['status']} for r in conn.execute("SELECT * FROM handoff_returns WHERE project_id=? AND status='pending' ORDER BY created_at DESC",(project_id,))],
             })
 
     def list_playbooks(self) -> None:
@@ -1965,6 +2016,10 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, {"detail": "请选择要导入的文件"}, 400)
         title_value = form.get("title", "")
         project_id = str(form.get("project_id", "") or "").strip()
+        if project_id:
+            with connect() as conn:
+                if not conn.execute("SELECT 1 FROM collections WHERE id=?", (project_id,)).fetchone():
+                    return json_response(self, {"detail": "没有找到这个项目"}, 404)
         source_id = str(uuid.uuid4())
         original_name = Path(file_item["filename"]).name
         suffix = Path(original_name).suffix.lower()
@@ -1982,6 +2037,7 @@ class Handler(BaseHTTPRequestHandler):
                 if existing:
                     stored_path.unlink(missing_ok=True)
                     link_project_item(conn, project_id, "source", existing["id"])
+                    knowledge.select_source(conn, project_id, existing["id"], original_name)
                     add_event(conn, "source", f"资料已关联到项目：{existing['title']}", "重复文件未重新导入", project_id)
             if existing:
                 return json_response(self, {"duplicate": True, "source": row_dict(existing)})
@@ -2025,19 +2081,9 @@ class Handler(BaseHTTPRequestHandler):
                         (source_id, index, source_title, chunk["content"], int(chunk["page_start"] or 0), int(chunk["page_end"] or 0), created),
                     )
                 retrieval.index_source(conn, source_id)
-                stale = conn.execute(
-                    "SELECT id, title FROM sources WHERE original_name = ? AND id != ? AND superseded = 0",
-                    (original_name, source_id),
-                ).fetchall()
-                for old in stale:
-                    conn.execute(
-                        "UPDATE sources SET superseded = 1, superseded_by = ?, updated_at = ? WHERE id = ?",
-                        (source_id, created, old["id"]),
-                    )
+                knowledge.select_source(conn, project_id, source_id, original_name)
                 link_project_item(conn, project_id, "source", source_id)
                 add_event(conn, "source", f"已导入资料：{source_title}", f"{len(chunks)} 个内容块 · {quality.get('engine', 'unknown')}", project_id)
-                if stale:
-                    add_event(conn, "source", f"资料已更新：{source_title}", f"旧版本标记为被取代（{len(stale)} 份）", project_id)
                 try:
                     wiki.update_pages_for_source(conn, source_id)
                 except Exception as exc:
@@ -2307,40 +2353,46 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, {"detail": "问题不能为空"}, 400)
         created = now_iso()
         conversation_id = str(payload.get("conversation_id") or str(uuid.uuid4()))
+        project_id = str(payload.get("project_id") or "").strip()
         with connect() as conn:
-            conv = conn.execute("SELECT id FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
-            if not conv:
-                conn.execute("INSERT INTO conversations(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", (conversation_id, safe_title(question), created, created))
-            contexts = search_chunks(conn, question, 8)
-            tier, gate_reason = retrieval.confidence(conn, contexts, question)
+            conv = conn.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if conv and conv["project_id"] != project_id:
+                return json_response(self, {"detail": "请为另一个项目开始新的对话"}, 409)
+            if project_id and not conn.execute("SELECT 1 FROM collections WHERE id=?", (project_id,)).fetchone():
+                return json_response(self, {"detail": "没有找到这个项目"}, 404)
+            history = [dict(r) for r in conn.execute(
+                "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY rowid DESC LIMIT 6",
+                (conversation_id,),
+            )][::-1]
+            for message in history:
+                message["content"] = message["content"][:2000]
+            retrieval_query = question
+            if history and len(question) <= 40 and re.search(r"它|这个|那个|上面|刚才|继续|再说|为什么|多少|呢|\b(it|that|more)\b", question, re.I):
+                previous = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+                retrieval_query = previous[:300] + " " + question
+            contexts = search_chunks(conn, retrieval_query, 8, project_id)
+            tier, gate_reason = retrieval.confidence(conn, contexts, retrieval_query)
             if tier == "abstain":
                 contexts = []
             settings = get_secret_settings(conn)
-            if settings["api_key"] and contexts:
-                answer = call_llm(settings, question, contexts)
-            else:
-                answer = local_answer(question, contexts)
-            if tier == "low" and contexts:
-                answer = "⚠️ 低置信:资料库中仅找到部分相关内容,请核对原文后再采信。\n\n" + answer
-            citations = [
-                {
-                    "source_id": item["source_id"],
-                    "chunk_id": item["chunk_id"],
-                    "title": item["title"],
-                    "page_start": item.get("page_start", 0),
-                    "page_end": item.get("page_end", 0),
-                    "location": cite_location(item),
-                    "snippet": re.sub(r"<.*?>", "", item["snippet"]),
-                }
-                for item in contexts[:6]
-            ]
-            conn.execute("INSERT INTO messages(id, conversation_id, role, content, citations_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), conversation_id, "user", question, "[]", created))
-            conn.execute("INSERT INTO messages(id, conversation_id, role, content, citations_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), conversation_id, "assistant", answer, json.dumps(citations, ensure_ascii=False), now_iso()))
-            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now_iso(), conversation_id))
-            detail = f"{len(citations)} 条引用/{tier}" if citations else f"低置信拒答（{gate_reason}）"
-            add_event(conn, "chat", f"已提问：{question[:80]}", detail)
-            response = {"conversation_id": conversation_id, "answer": answer, "citations": citations, "confidence": tier, "gate_reason": gate_reason}
-        json_response(self, response)
+            if not conv:
+                conn.execute("INSERT INTO conversations(id,title,project_id,created_at,updated_at) VALUES (?,?,?,?,?)", (conversation_id,safe_title(question),project_id,created,created))
+            conn.execute("INSERT INTO messages(id,conversation_id,role,content,citations_json,created_at) VALUES (?,?,?,?,?,?)", (str(uuid.uuid4()),conversation_id,"user",question,"[]",created))
+        # Network waits must never hold a write transaction.
+        answer = call_llm(settings, question, contexts, history) if settings["api_key"] and contexts else local_answer(question, contexts)
+        if tier == "low" and contexts:
+            answer = "⚠️ 低置信：仅找到部分相关内容，请核对原文后再采信。\n\n" + answer
+        citations = [{
+            "source_id": item["source_id"], "chunk_id": item["chunk_id"],
+            "item_type": item.get("item_type", "source"), "item_id": item.get("item_id", item["source_id"]),
+            "title": item["title"], "page_start": item.get("page_start",0), "page_end": item.get("page_end",0),
+            "location": cite_location(item), "snippet": re.sub(r"<.*?>", "", item["snippet"]),
+        } for item in contexts[:6]]
+        with connect() as conn:
+            conn.execute("INSERT INTO messages(id,conversation_id,role,content,citations_json,created_at) VALUES (?,?,?,?,?,?)", (str(uuid.uuid4()),conversation_id,"assistant",answer,json.dumps(citations,ensure_ascii=False),now_iso()))
+            conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now_iso(),conversation_id))
+            add_event(conn,"chat",f"已提问：{question[:80]}",f"{len(citations)} 条引用/{tier}",project_id)
+        json_response(self, {"conversation_id":conversation_id,"answer":answer,"citations":citations,"confidence":tier,"gate_reason":gate_reason})
 
     def get_conversation(self, conversation_id: str) -> None:
         with connect() as conn:

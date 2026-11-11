@@ -251,11 +251,16 @@ def _coverage(conn: sqlite3.Connection, query: str, contents: str | list[str]) -
     return round(matched / total, 3) if total > 0 else None
 
 
-def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[dict[str, Any]]:
+def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8, project_id: str = "") -> list[dict[str, Any]]:
     """三路召回 + RRF 融合。返回附带 confidence_signals 的结果列表。"""
     q = (query or "").strip()
     if not q:
         return []
+    scope = ""
+    scope_params = ()
+    if project_id:
+        scope = " AND sources.id IN (SELECT source_id FROM source_heads WHERE project_id = ?)"
+        scope_params = (project_id,)
     lats = latin_tokens(q)
     qb = list(dict.fromkeys(cjk_bigrams(q)))[:80]
 
@@ -273,10 +278,10 @@ def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[
             FROM chunks_fts
             JOIN chunks ON chunks_fts.rowid = chunks.id
             JOIN sources ON chunks.source_id = sources.id
-            WHERE chunks_fts MATCH ? AND sources.superseded = 0
+            WHERE chunks_fts MATCH ? AND sources.superseded = 0{scope}
             ORDER BY rank LIMIT 50
             """,
-            (_fts_query(q),),
+            (_fts_query(q), *scope_params),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
@@ -293,15 +298,15 @@ def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[
     if qb:
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT cb.chunk_id, cb.body, bm25(chunks_bigram) AS rank
                 FROM chunks_bigram cb
                 JOIN chunks ON chunks.id = cb.chunk_id
                 JOIN sources ON chunks.source_id = sources.id
-                WHERE chunks_bigram MATCH ? AND sources.superseded = 0
+                WHERE chunks_bigram MATCH ? AND sources.superseded = 0{scope}
                 ORDER BY rank LIMIT 50
                 """,
-                (" OR ".join(qb),),
+                (" OR ".join(qb), *scope_params),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
@@ -318,12 +323,12 @@ def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[
     leg_c: dict[int, float] = {}
     qvec = embed(q)
     for r in conn.execute(
-        """
+        f"""
         SELECT cv.chunk_id, cv.vector FROM chunk_vectors cv
         JOIN chunks ON chunks.id = cv.chunk_id
         JOIN sources ON chunks.source_id = sources.id
-        WHERE sources.superseded = 0
-        """
+        WHERE sources.superseded = 0{scope}
+        """, scope_params
     ).fetchall():
         sim = cosine(qvec, unpack_vector(r["vector"]))
         if sim >= VEC_FLOOR:
@@ -347,10 +352,10 @@ def search_chunks(conn: sqlite3.Connection, query: str, limit: int = 8) -> list[
             f"""
             SELECT {_CHUNK_FIELDS} FROM chunks
             JOIN sources ON chunks.source_id = sources.id
-            WHERE sources.superseded = 0 AND (chunks.content LIKE ? OR chunks.title LIKE ?)
+            WHERE sources.superseded = 0{scope} AND (chunks.content LIKE ? OR chunks.title LIKE ?)
             ORDER BY chunks.id DESC LIMIT 3
             """,
-            (like, like),
+            (*scope_params, like, like),
         ).fetchall():
             d = dict(r)
             candidates[d["chunk_id"]] = d
@@ -423,7 +428,8 @@ def confidence(conn: sqlite3.Connection, results: list[dict[str, Any]], query: s
     sig = results[0].get("confidence_signals", {})
     if sig.get("source") == "like_fallback":
         return "confident", "like_exact"
-    if any(_latin_df(conn, t) == 0 for t in latin_tokens(query)):
+    extra_text = ' '.join(r.get('content', '') for r in results if r.get('item_type') in {'note', 'memory', 'task'}).lower()
+    if any(_latin_df(conn, t) == 0 and t not in extra_text for t in latin_tokens(query)):
         return "abstain", "unknown_term"
     # 覆盖度按 top3 证据集联合计算:问题的证据往往分散在多个 chunk,
     # 只看 top1 会把"答案不在第一名"的有效问题错杀(真实语料验证结论)。
